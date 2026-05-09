@@ -1,0 +1,34 @@
+# Core build tooling
+base-devel
+git
+rustup
+pkgconf
+clang
+cmake
+meson
+ninja
+
+# GTK4 UI stack
+gtk4
+libadwaita
+
+# GStreamer runtime/plugins
+gstreamer
+gst-plugins-base
+gst-plugins-good
+gst-plugins-bad
+gst-plugins-ugly
+gst-libav
+gst-plugin-pipewire
+gst-plugin-gtk4
+
+# Audio stack
+pipewire
+pipewire-pulse
+alsa-lib
+
+# Supporting libs/tools
+sqlite
+openssl
+curl
+jq
