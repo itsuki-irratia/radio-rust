@@ -41,7 +41,13 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
             mute,
             db,
         } => run_schedule_add(&db, &file, &at, fade_in, fade_out, volume, mute),
-        ScheduleCommands::List { db, json } => run_schedule_list(&db, json),
+        ScheduleCommands::List {
+            db,
+            json,
+            day,
+            from,
+            to,
+        } => run_schedule_list(&db, json, day.as_deref(), from.as_deref(), to.as_deref()),
         ScheduleCommands::Run { db } => run_schedule_run(&db),
     }
 }

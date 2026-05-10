@@ -84,10 +84,25 @@ cargo run -- schedule add "/path/to/playlist.xspf" --at "2026-05-10 22:45:00"
 cargo run -- schedule list
 ```
 
+Show one local calendar day:
+
+```bash
+cargo run -- schedule list --day today
+cargo run -- schedule list --day 2026-05-10
+```
+
+Show a local date range:
+
+```bash
+cargo run -- schedule list --from 2026-05-10 --to 2026-05-12
+```
+
 JSON output:
 
 ```bash
 cargo run -- schedule list --json
+cargo run -- schedule list --day today --json
+cargo run -- schedule list --from 2026-05-10 --to 2026-05-12 --json
 ```
 
 #### Run scheduler

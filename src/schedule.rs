@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone};
+use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use gstreamer as gst;
 use rusqlite::types::Type;
 use rusqlite::{Connection, Row, params};
@@ -95,10 +95,21 @@ pub fn run_schedule_add(
     Ok(())
 }
 
-pub fn run_schedule_list(db_path: &Path, json: bool) -> Result<()> {
+pub fn run_schedule_list(
+    db_path: &Path,
+    json: bool,
+    day: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<()> {
+    let date_filter = parse_schedule_date_filter(day, from, to)?;
     crate::cron::sync_cron_schedule(db_path)?;
     let mut db = load_schedule(db_path)?;
     sort_schedule_entries(&mut db.entries);
+    if let Some(filter) = date_filter {
+        db.entries
+            .retain(|entry| filter.matches(entry.at.date_naive()));
+    }
 
     if json {
         println!(
@@ -109,7 +120,15 @@ pub fn run_schedule_list(db_path: &Path, json: bool) -> Result<()> {
     }
 
     if db.entries.is_empty() {
-        println!("No scheduled items in {}", db_path.display());
+        if let Some(filter) = date_filter {
+            println!(
+                "No scheduled items for {} in {}",
+                filter.description(),
+                db_path.display()
+            );
+        } else {
+            println!("No scheduled items in {}", db_path.display());
+        }
         return Ok(());
     }
 
@@ -453,6 +472,65 @@ fn parse_scheduled_datetime(input: &str) -> Result<DateTime<Local>> {
     bail!(
         "Invalid datetime format: {input}. Use RFC3339 like 2026-05-10T21:30:00+02:00 or local form YYYY-MM-DD HH:MM[:SS]"
     )
+}
+
+fn parse_schedule_day(input: &str) -> Result<NaiveDate> {
+    if input.eq_ignore_ascii_case("today") {
+        return Ok(Local::now().date_naive());
+    }
+
+    NaiveDate::parse_from_str(input, "%Y-%m-%d").with_context(|| {
+        format!("Invalid day {input}. Use `today` or a local date like 2026-05-10")
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ScheduleDateFilter {
+    from: NaiveDate,
+    to: NaiveDate,
+}
+
+impl ScheduleDateFilter {
+    fn matches(self, day: NaiveDate) -> bool {
+        self.from <= day && day <= self.to
+    }
+
+    fn description(self) -> String {
+        if self.from == self.to {
+            self.from.to_string()
+        } else {
+            format!("{} to {}", self.from, self.to)
+        }
+    }
+}
+
+fn parse_schedule_date_filter(
+    day: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<Option<ScheduleDateFilter>> {
+    if day.is_some() && (from.is_some() || to.is_some()) {
+        bail!("Use either `--day` or `--from`/`--to`, not both");
+    }
+
+    if let Some(day) = day {
+        let day = parse_schedule_day(day)?;
+        return Ok(Some(ScheduleDateFilter { from: day, to: day }));
+    }
+
+    match (from, to) {
+        (None, None) => Ok(None),
+        (Some(from), Some(to)) => {
+            let from = parse_schedule_day(from)?;
+            let to = parse_schedule_day(to)?;
+            if from > to {
+                bail!("Invalid date range: --from {from} is after --to {to}");
+            }
+            Ok(Some(ScheduleDateFilter { from, to }))
+        }
+        (Some(_), None) => bail!("Missing --to for schedule date range"),
+        (None, Some(_)) => bail!("Missing --from for schedule date range"),
+    }
 }
 
 fn resolve_local_datetime(naive: NaiveDateTime, input: &str) -> Result<DateTime<Local>> {

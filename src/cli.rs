@@ -84,6 +84,12 @@ pub enum ScheduleCommands {
         db: PathBuf,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        day: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
     },
     Run {
         #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
