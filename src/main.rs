@@ -1,4 +1,5 @@
 mod cli;
+mod cron;
 mod gui;
 mod playback;
 mod schedule;
@@ -8,7 +9,8 @@ mod types;
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::{Cli, Commands, ScheduleCommands, ServiceCommands};
+use crate::cli::{Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands};
+use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
@@ -19,6 +21,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Scan { folder, json } => run_scan(&folder, json),
         Commands::Schedule { command } => run_schedule_command(command),
+        Commands::Cron { command } => run_cron_command(command),
         Commands::Service { command } => run_service_command(command),
         Commands::Gui => {
             gui::run_gui();
@@ -40,6 +43,22 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
         } => run_schedule_add(&db, &file, &at, fade_in, fade_out, volume, mute),
         ScheduleCommands::List { db, json } => run_schedule_list(&db, json),
         ScheduleCommands::Run { db } => run_schedule_run(&db),
+    }
+}
+
+fn run_cron_command(command: CronCommands) -> Result<()> {
+    match command {
+        CronCommands::Add {
+            file,
+            expr,
+            fade_in,
+            fade_out,
+            volume,
+            mute,
+            db,
+        } => run_cron_add(&db, &file, &expr, fade_in, fade_out, volume, mute),
+        CronCommands::List { db, json } => run_cron_list(&db, json),
+        CronCommands::Remove { id, db } => run_cron_remove(&db, id),
     }
 }
 

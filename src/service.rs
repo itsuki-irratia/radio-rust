@@ -8,6 +8,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::cron::sync_cron_schedule;
 use crate::playback::{
     PlaybackStart, apply_live_audio_state, build_playbin_from_source, expand_playback_sources,
     resolve_effective_audio, start_playbin_at_offset, validate_playback_source,
@@ -32,6 +33,7 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
     );
 
     loop {
+        sync_cron_schedule(db_path)?;
         let mut db = load_schedule(db_path)?;
         sort_schedule_entries(&mut db.entries);
 
@@ -565,6 +567,7 @@ fn pending_replacement(
     current_fade_out_secs: u64,
 ) -> Result<Option<PendingReplacement>> {
     let now = chrono::Local::now();
+    sync_cron_schedule(db_path)?;
     let db = load_schedule(db_path)?;
     let fade_window = chrono::Duration::seconds(current_fade_out_secs as i64);
     Ok(db

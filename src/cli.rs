@@ -21,11 +21,45 @@ pub enum Commands {
         #[command(subcommand)]
         command: ScheduleCommands,
     },
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
     Service {
         #[command(subcommand)]
         command: ServiceCommands,
     },
     Gui,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CronCommands {
+    Add {
+        file: PathBuf,
+        #[arg(long)]
+        expr: String,
+        #[arg(long, default_value_t = 5)]
+        fade_in: u64,
+        #[arg(long, default_value_t = 5)]
+        fade_out: u64,
+        #[arg(long, default_value_t = DEFAULT_VOLUME)]
+        volume: f64,
+        #[arg(long, default_value_t = false)]
+        mute: bool,
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
+    List {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        id: u64,
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]

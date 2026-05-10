@@ -101,6 +101,40 @@ Starts a loop that:
 cargo run -- schedule run
 ```
 
+### Cron schedules
+
+Cron schedules use the same five fields as a Linux crontab:
+
+```text
+minute hour day-of-month month day-of-week
+```
+
+Supported field forms include `*`, comma lists, ranges, and steps such as
+`*/15`, `1,2,5`, `mon-fri`, and `9-17/2`. Month and weekday names are accepted.
+
+Add the Bizkaia stream every Monday and Tuesday at 13:00:
+
+```bash
+cargo run -- cron add "https://server12.mediasector.es/listen/bizkaia_irratia/bizkaiairratia.mp3" \
+  --expr "0 13 * * mon-tue"
+```
+
+List cron schedules:
+
+```bash
+cargo run -- cron list
+```
+
+Remove a cron schedule:
+
+```bash
+cargo run -- cron remove 1
+```
+
+Cron items are stored in the same SQLite database. The service materializes the
+next matching cron occurrence into the normal one-shot schedule queue, so
+scheduled replacement/fade behavior stays the same.
+
 ### Service mode (recommended for background use)
 
 `service run` keeps a daemon process running and lets you control it from other terminals.

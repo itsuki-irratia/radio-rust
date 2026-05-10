@@ -96,6 +96,7 @@ pub fn run_schedule_add(
 }
 
 pub fn run_schedule_list(db_path: &Path, json: bool) -> Result<()> {
+    crate::cron::sync_cron_schedule(db_path)?;
     let mut db = load_schedule(db_path)?;
     sort_schedule_entries(&mut db.entries);
 
@@ -131,6 +132,7 @@ pub fn run_schedule_run(db_path: &Path) -> Result<()> {
     gst::init().context("Failed to initialize GStreamer")?;
 
     loop {
+        crate::cron::sync_cron_schedule(db_path)?;
         let mut db = load_schedule(db_path)?;
         sort_schedule_entries(&mut db.entries);
 
@@ -195,7 +197,7 @@ pub fn remove_schedule_entry(db_path: &Path, id: u64) -> Result<()> {
     Ok(())
 }
 
-fn open_schedule_db(db_path: &Path) -> Result<Connection> {
+pub fn open_schedule_db(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -228,13 +230,39 @@ fn init_schedule_schema(conn: &Connection) -> Result<()> {
             fade_in_secs INTEGER NOT NULL,
             fade_out_secs INTEGER NOT NULL,
             volume REAL NOT NULL DEFAULT 1.0,
-            mute INTEGER NOT NULL DEFAULT 0 CHECK (mute IN (0, 1))
+            mute INTEGER NOT NULL DEFAULT 0 CHECK (mute IN (0, 1)),
+            cron_id INTEGER,
+            cron_at_unix_ms INTEGER
         );
         CREATE INDEX IF NOT EXISTS schedule_entries_at_idx
             ON schedule_entries (at_unix_ms, id);
         ",
     )
-    .context("Failed to initialize schedule database schema")
+    .context("Failed to initialize schedule database schema")?;
+    add_schedule_column_if_missing(conn, "cron_id", "INTEGER")?;
+    add_schedule_column_if_missing(conn, "cron_at_unix_ms", "INTEGER")?;
+    conn.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS schedule_entries_cron_occurrence_idx
+            ON schedule_entries (cron_id, cron_at_unix_ms)
+            WHERE cron_id IS NOT NULL AND cron_at_unix_ms IS NOT NULL;
+        ",
+    )
+    .context("Failed to initialize schedule cron occurrence index")?;
+    Ok(())
+}
+
+fn add_schedule_column_if_missing(conn: &Connection, name: &str, data_type: &str) -> Result<()> {
+    let sql = format!("ALTER TABLE schedule_entries ADD COLUMN {name} {data_type}");
+    match conn.execute(&sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("Failed to add schedule column {name}")),
+    }
 }
 
 fn import_legacy_json_schedule(db_path: &Path, conn: &Connection) -> Result<()> {

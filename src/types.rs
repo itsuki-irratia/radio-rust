@@ -33,6 +33,26 @@ pub struct ScheduleDb {
     pub entries: Vec<ScheduleEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronEntry {
+    pub id: u64,
+    pub expression: String,
+    pub file: String,
+    pub fade_in_secs: u64,
+    pub fade_out_secs: u64,
+    #[serde(default = "default_volume")]
+    pub volume: f64,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CronDb {
+    pub entries: Vec<CronEntry>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LiveOverrides {
     pub volume: Option<f64>,
@@ -67,4 +87,8 @@ pub enum ServiceDirective {
 
 pub fn default_volume() -> f64 {
     DEFAULT_VOLUME
+}
+
+pub fn default_enabled() -> bool {
+    true
 }
