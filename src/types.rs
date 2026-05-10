@@ -60,6 +60,7 @@ pub enum ServiceDirective {
     Continue,
     SkipCurrent,
     StopAudio,
+    ReplaceCurrent,
     StopService,
 }
 

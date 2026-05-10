@@ -2,17 +2,25 @@ use anyhow::{Context, Result, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::path::Path;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::schedule::validate_volume;
 use crate::types::{FADE_TICK_MS, LiveOverrides};
 
-pub fn play_file_with_fades(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackStart {
+    Started,
+    PastEnd,
+}
+
+pub fn play_file_with_fades_from(
     file: &Path,
     fade_in_secs: u64,
     fade_out_secs: u64,
     volume: f64,
     mute: bool,
+    start_offset: Duration,
 ) -> Result<()> {
     validate_playback_source(&file.display().to_string())?;
     validate_volume(volume)?;
@@ -28,12 +36,21 @@ pub fn play_file_with_fades(
         playbin.set_property("volume", target_volume);
     }
 
-    playbin
-        .set_state(gst::State::Playing)
-        .context("Failed to set playback state to Playing")?;
+    if start_playbin_at_offset(&playbin, &file.display().to_string(), start_offset)?
+        == PlaybackStart::PastEnd
+    {
+        println!(
+            "Skipping {} because offset {}s is past the end",
+            file.display(),
+            start_offset.as_secs()
+        );
+        return Ok(());
+    }
+
     println!(
-        "Playing {} (fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
+        "Playing {} (offset {}s, fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
         file.display(),
+        start_offset.as_secs(),
         fade_in_secs,
         fade_out_secs,
         volume,
@@ -42,7 +59,9 @@ pub fn play_file_with_fades(
 
     let bus = playbin.bus().context("Pipeline has no message bus")?;
     let fade_tick = gst::ClockTime::from_mseconds(FADE_TICK_MS);
-    let fade_in_start = Instant::now();
+    let fade_in_start = Instant::now()
+        .checked_sub(start_offset)
+        .unwrap_or_else(Instant::now);
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
@@ -186,6 +205,68 @@ fn source_to_uri(source: &str) -> Result<String> {
         .context("Failed to convert file path into URI")
 }
 
-fn is_remote_media_source(source: &str) -> bool {
+pub fn is_remote_media_source(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
+}
+
+pub fn seek_to_start_offset(
+    playbin: &gst::Element,
+    source: &str,
+    start_offset: Duration,
+) -> Result<()> {
+    if start_offset.is_zero() || is_remote_media_source(source) {
+        return Ok(());
+    }
+
+    let position =
+        gst::ClockTime::from_nseconds(start_offset.as_nanos().min(u64::MAX as u128) as u64);
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if playbin
+            .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, position)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    playbin
+        .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, position)
+        .with_context(|| format!("Failed to seek {source} to {}s", start_offset.as_secs()))?;
+    Ok(())
+}
+
+pub fn start_playbin_at_offset(
+    playbin: &gst::Element,
+    source: &str,
+    start_offset: Duration,
+) -> Result<PlaybackStart> {
+    if start_offset.is_zero() || is_remote_media_source(source) {
+        playbin
+            .set_state(gst::State::Playing)
+            .context("Failed to set playback state to Playing")?;
+        return Ok(PlaybackStart::Started);
+    }
+
+    playbin
+        .set_state(gst::State::Paused)
+        .context("Failed to set playback state to Paused before seeking")?;
+    let (state_result, _, _) = playbin.state(gst::ClockTime::from_seconds(5));
+    state_result.context("Failed to preroll playback before seeking")?;
+
+    let offset_ns = start_offset.as_nanos().min(u64::MAX as u128) as u64;
+    if let Some(duration) = playbin.query_duration::<gst::ClockTime>() {
+        if offset_ns >= duration.nseconds() {
+            let _ = playbin.set_state(gst::State::Null);
+            return Ok(PlaybackStart::PastEnd);
+        }
+    }
+
+    seek_to_start_offset(playbin, source, start_offset)?;
+
+    playbin
+        .set_state(gst::State::Playing)
+        .context("Failed to set playback state to Playing after seeking")?;
+    Ok(PlaybackStart::Started)
 }

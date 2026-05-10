@@ -6,10 +6,11 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::playback::{
-    apply_live_audio_state, build_playbin, resolve_effective_audio, validate_playback_source,
+    PlaybackStart, apply_live_audio_state, build_playbin, resolve_effective_audio,
+    start_playbin_at_offset, validate_playback_source,
 };
 use crate::schedule::{load_schedule, save_schedule, sort_schedule_entries, validate_volume};
 use crate::types::{
@@ -41,7 +42,8 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
         match directive {
             ServiceDirective::Continue
             | ServiceDirective::SkipCurrent
-            | ServiceDirective::StopAudio => {}
+            | ServiceDirective::StopAudio
+            | ServiceDirective::ReplaceCurrent => {}
             ServiceDirective::StopService => {
                 println!("Service shutdown requested.");
                 break;
@@ -66,14 +68,20 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
             &listener,
             &mut overrides,
             &mut state,
+            db_path,
             db.entries.len(),
         )?;
 
         match outcome {
-            ServiceDirective::Continue | ServiceDirective::SkipCurrent => {
-                db.entries.retain(|item| item.id != entry.id);
-                save_schedule(db_path, &db)?;
-                println!("Completed and removed #{}", entry.id);
+            ServiceDirective::Continue
+            | ServiceDirective::SkipCurrent
+            | ServiceDirective::ReplaceCurrent => {
+                remove_schedule_entry(db_path, entry.id)?;
+                if outcome == ServiceDirective::ReplaceCurrent {
+                    println!("Replaced and removed #{}", entry.id);
+                } else {
+                    println!("Completed and removed #{}", entry.id);
+                }
             }
             ServiceDirective::StopService => {
                 println!("Service shutdown requested during playback.");
@@ -185,6 +193,9 @@ fn merge_service_directive(
         }
         (_, ServiceDirective::StopAudio) | (ServiceDirective::StopAudio, _) => {
             ServiceDirective::StopAudio
+        }
+        (_, ServiceDirective::ReplaceCurrent) | (ServiceDirective::ReplaceCurrent, _) => {
+            ServiceDirective::ReplaceCurrent
         }
         (_, ServiceDirective::SkipCurrent) | (ServiceDirective::SkipCurrent, _) => {
             ServiceDirective::SkipCurrent
@@ -337,12 +348,14 @@ fn play_entry_with_service_control(
     listener: &UnixListener,
     overrides: &mut LiveOverrides,
     state: &mut ServiceState,
+    db_path: &Path,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
     let file = PathBuf::from(&entry.file);
     validate_playback_source(&entry.file)?;
 
     validate_volume(entry.volume)?;
+    let start_offset = scheduled_start_offset(entry);
     let playbin = build_playbin(&file)?;
     apply_live_audio_state(
         &playbin,
@@ -352,14 +365,20 @@ fn play_entry_with_service_control(
         *overrides,
     );
 
-    playbin
-        .set_state(gst::State::Playing)
-        .context("Failed to set playback state to Playing")?;
+    if start_playbin_at_offset(&playbin, &entry.file, start_offset)? == PlaybackStart::PastEnd {
+        println!(
+            "Skipping #{} because offset {}s is past the end",
+            entry.id,
+            start_offset.as_secs()
+        );
+        return Ok(ServiceDirective::Continue);
+    }
     let label = format!("#{}", entry.id);
     println!(
-        "Playing {} {} (fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
+        "Playing {} {} (offset {}s, fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
         label,
         file.display(),
+        start_offset.as_secs(),
         entry.fade_in_secs,
         entry.fade_out_secs,
         entry.volume,
@@ -368,7 +387,9 @@ fn play_entry_with_service_control(
 
     let bus = playbin.bus().context("Pipeline has no message bus")?;
     let fade_tick = gst::ClockTime::from_mseconds(FADE_TICK_MS);
-    let fade_in_start = Instant::now();
+    let fade_in_start = Instant::now()
+        .checked_sub(start_offset)
+        .unwrap_or_else(Instant::now);
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
@@ -395,6 +416,37 @@ fn play_entry_with_service_control(
                     .context("Failed to stop pipeline on shutdown request")?;
                 return Ok(ServiceDirective::StopService);
             }
+            ServiceDirective::ReplaceCurrent => {
+                let (effective_volume, effective_mute) =
+                    resolve_effective_audio(entry.volume, entry.mute, *overrides);
+                fade_out_pipeline(
+                    &playbin,
+                    entry.fade_out_secs,
+                    if effective_mute {
+                        0.0
+                    } else {
+                        effective_volume
+                    },
+                );
+                println!("Schedule replacement requested for {}", label);
+                return Ok(ServiceDirective::ReplaceCurrent);
+            }
+        }
+
+        if has_due_replacement(db_path, entry.id)? {
+            let (effective_volume, effective_mute) =
+                resolve_effective_audio(entry.volume, entry.mute, *overrides);
+            fade_out_pipeline(
+                &playbin,
+                entry.fade_out_secs,
+                if effective_mute {
+                    0.0
+                } else {
+                    effective_volume
+                },
+            );
+            println!("Due scheduled item is replacing {}", label);
+            return Ok(ServiceDirective::ReplaceCurrent);
         }
 
         if let Some(message) = bus.timed_pop(fade_tick) {
@@ -458,4 +510,43 @@ fn play_entry_with_service_control(
         .set_state(gst::State::Null)
         .context("Failed to stop GStreamer pipeline")?;
     Ok(ServiceDirective::Continue)
+}
+
+fn has_due_replacement(db_path: &Path, current_id: u64) -> Result<bool> {
+    let now = chrono::Local::now();
+    let db = load_schedule(db_path)?;
+    Ok(db
+        .entries
+        .iter()
+        .any(|entry| entry.id != current_id && entry.at <= now))
+}
+
+fn remove_schedule_entry(db_path: &Path, id: u64) -> Result<()> {
+    let mut db = load_schedule(db_path)?;
+    db.entries.retain(|item| item.id != id);
+    save_schedule(db_path, &db)
+}
+
+fn scheduled_start_offset(entry: &ScheduleEntry) -> Duration {
+    (chrono::Local::now() - entry.at)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
+fn fade_out_pipeline(playbin: &gst::Element, fade_out_secs: u64, start_volume: f64) {
+    if fade_out_secs == 0 || start_volume <= 0.0 {
+        let _ = playbin.set_state(gst::State::Null);
+        return;
+    }
+
+    let started = Instant::now();
+    loop {
+        let ratio = (started.elapsed().as_secs_f64() / fade_out_secs as f64).min(1.0);
+        playbin.set_property("volume", start_volume * (1.0 - ratio));
+        if ratio >= 1.0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(FADE_TICK_MS));
+    }
+    let _ = playbin.set_state(gst::State::Null);
 }

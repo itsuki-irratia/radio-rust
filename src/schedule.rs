@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::playback::{canonical_playback_source, play_file_with_fades};
+use crate::playback::{canonical_playback_source, play_file_with_fades_from};
 use crate::types::{SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry};
 
 pub fn run_scan(folder: &Path, json: bool) -> Result<()> {
@@ -149,13 +149,15 @@ pub fn run_schedule_run(db_path: &Path) -> Result<()> {
             );
         }
 
+        let start_offset = (Local::now() - next.at).to_std().unwrap_or_default();
         let file = PathBuf::from(&next.file);
-        play_file_with_fades(
+        play_file_with_fades_from(
             &file,
             next.fade_in_secs,
             next.fade_out_secs,
             next.volume,
             next.mute,
+            start_offset,
         )?;
 
         db.entries.retain(|entry| entry.id != next.id);
