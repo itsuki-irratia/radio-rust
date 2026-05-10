@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use std::path::Path;
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,11 +25,45 @@ pub fn play_file_with_fades_from(
     mute: bool,
     start_offset: Duration,
 ) -> Result<()> {
-    validate_playback_source(&file.display().to_string())?;
+    let source = file.display().to_string();
+    let sources = expand_playback_sources(&source)?;
     validate_volume(volume)?;
 
     gst::init().context("Failed to initialize GStreamer")?;
-    let playbin = build_playbin(file)?;
+    for (index, source) in sources.iter().enumerate() {
+        let track_fade_in = if index == 0 { fade_in_secs } else { 0 };
+        let track_fade_out = if index + 1 == sources.len() {
+            fade_out_secs
+        } else {
+            0
+        };
+        play_source_with_fades_from(
+            source,
+            track_fade_in,
+            track_fade_out,
+            volume,
+            mute,
+            if index == 0 {
+                start_offset
+            } else {
+                Duration::ZERO
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn play_source_with_fades_from(
+    source: &str,
+    fade_in_secs: u64,
+    fade_out_secs: u64,
+    volume: f64,
+    mute: bool,
+    start_offset: Duration,
+) -> Result<()> {
+    validate_playback_source(source)?;
+
+    let playbin = build_playbin_from_source(source)?;
     let target_volume = if mute { 0.0 } else { volume };
     playbin.set_property("mute", mute);
 
@@ -36,12 +73,10 @@ pub fn play_file_with_fades_from(
         playbin.set_property("volume", target_volume);
     }
 
-    if start_playbin_at_offset(&playbin, &file.display().to_string(), start_offset)?
-        == PlaybackStart::PastEnd
-    {
+    if start_playbin_at_offset(&playbin, source, start_offset)? == PlaybackStart::PastEnd {
         println!(
             "Skipping {} because offset {}s is past the end",
-            file.display(),
+            source,
             start_offset.as_secs()
         );
         return Ok(());
@@ -49,7 +84,7 @@ pub fn play_file_with_fades_from(
 
     println!(
         "Playing {} (offset {}s, fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
-        file.display(),
+        source,
         start_offset.as_secs(),
         fade_in_secs,
         fade_out_secs,
@@ -145,13 +180,12 @@ pub fn apply_live_audio_state(
     }
 }
 
-pub fn build_playbin(file: &Path) -> Result<gst::Element> {
+pub fn build_playbin_from_source(source: &str) -> Result<gst::Element> {
     let playbin = gst::ElementFactory::make("playbin")
         .build()
         .context("Could not create GStreamer playbin element")?;
 
-    let source = file.display().to_string();
-    let uri = source_to_uri(&source)?;
+    let uri = source_to_uri(source)?;
     playbin.set_property("uri", uri.as_str());
 
     Ok(playbin)
@@ -161,8 +195,15 @@ pub fn canonical_playback_source(source: &str) -> Result<String> {
     if is_remote_media_source(source) {
         return Ok(source.to_string());
     }
+    if is_file_uri(source) {
+        let path = file_uri_to_path(source)?;
+        return canonical_path_source(&path);
+    }
 
-    let path = Path::new(source);
+    canonical_path_source(Path::new(source))
+}
+
+fn canonical_path_source(path: &Path) -> Result<String> {
     if !path.exists() {
         bail!("File does not exist: {}", path.display());
     }
@@ -181,8 +222,16 @@ pub fn validate_playback_source(source: &str) -> Result<()> {
     if is_remote_media_source(source) {
         return Ok(());
     }
+    if is_file_uri(source) {
+        let path = file_uri_to_path(source)?;
+        validate_path_source(&path)?;
+        return Ok(());
+    }
 
-    let path = Path::new(source);
+    validate_path_source(Path::new(source))
+}
+
+fn validate_path_source(path: &Path) -> Result<()> {
     if !path.exists() {
         bail!("File does not exist: {}", path.display());
     }
@@ -193,7 +242,7 @@ pub fn validate_playback_source(source: &str) -> Result<()> {
 }
 
 fn source_to_uri(source: &str) -> Result<String> {
-    if is_remote_media_source(source) {
+    if is_remote_media_source(source) || is_file_uri(source) {
         return Ok(source.to_string());
     }
 
@@ -207,6 +256,83 @@ fn source_to_uri(source: &str) -> Result<String> {
 
 pub fn is_remote_media_source(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
+}
+
+fn is_file_uri(source: &str) -> bool {
+    source.starts_with("file://")
+}
+
+fn is_uri_media_source(source: &str) -> bool {
+    is_remote_media_source(source) || is_file_uri(source)
+}
+
+fn file_uri_to_path(source: &str) -> Result<PathBuf> {
+    gst::glib::filename_from_uri(source)
+        .map(|(path, _hostname)| path)
+        .with_context(|| format!("Failed to decode file URI {source}"))
+}
+
+pub fn is_xspf_source(source: &str) -> bool {
+    !is_uri_media_source(source)
+        && Path::new(source)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("xspf"))
+}
+
+pub fn expand_playback_sources(source: &str) -> Result<Vec<String>> {
+    if !is_xspf_source(source) {
+        validate_playback_source(source)?;
+        return Ok(vec![source.to_string()]);
+    }
+
+    let path = Path::new(source);
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read XSPF playlist {}", path.display()))?;
+    let mut reader = Reader::from_str(&raw);
+    reader.config_mut().trim_text(true);
+    let mut locations = Vec::new();
+
+    loop {
+        match reader
+            .read_event()
+            .context("Failed to parse XSPF playlist")?
+        {
+            Event::Start(element) if element.local_name().as_ref() == b"location" => {
+                let location = reader
+                    .read_text(element.name())
+                    .context("Failed to read XSPF location")?;
+                let source = resolve_xspf_location(location.trim(), base_dir)?;
+                locations.push(source);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    if locations.is_empty() {
+        bail!("XSPF playlist has no track locations: {}", path.display());
+    }
+    Ok(locations)
+}
+
+fn resolve_xspf_location(location: &str, base_dir: &Path) -> Result<String> {
+    if is_remote_media_source(location) {
+        return Ok(location.to_string());
+    }
+    if is_file_uri(location) {
+        let path = file_uri_to_path(location)?;
+        return canonical_path_source(&path);
+    }
+
+    let path = PathBuf::from(location);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    };
+    canonical_playback_source(&path.display().to_string())
 }
 
 pub fn seek_to_start_offset(

@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::playback::{canonical_playback_source, play_file_with_fades_from};
+use crate::playback::{
+    canonical_playback_source, expand_playback_sources, is_xspf_source, play_file_with_fades_from,
+};
 use crate::types::{SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry};
 
 pub fn run_scan(folder: &Path, json: bool) -> Result<()> {
@@ -58,6 +60,9 @@ pub fn run_schedule_add(
     let canonical_source = canonical_playback_source(&source)?;
     if !is_remote_media_source(&canonical_source) && !is_supported_media_file(file) {
         bail!("Unsupported media extension for {}", file.display());
+    }
+    if is_xspf_source(&canonical_source) {
+        expand_playback_sources(&canonical_source)?;
     }
     validate_volume(volume)?;
 

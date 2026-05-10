@@ -30,7 +30,7 @@ cargo run -- --help
 ### Scan audio files
 
 Recursively scans a folder for supported audio files:
-`mp3`, `aac`, `flac`, `ogg`, `opus`, `wav`, `m4a`.
+`mp3`, `aac`, `flac`, `ogg`, `opus`, `wav`, `m4a`, `xspf`.
 
 ```bash
 cargo run -- scan /path/to/music
@@ -67,6 +67,13 @@ cargo run -- schedule add "/path/to/song.mp3" \
   --fade-out 7 \
   --volume 0.4 \
   --mute
+```
+
+XSPF playlists can be scheduled too. Local relative entries inside the playlist are resolved
+relative to the playlist file:
+
+```bash
+cargo run -- schedule add "/path/to/playlist.xspf" --at "2026-05-10 22:45:00"
 ```
 
 #### List schedule

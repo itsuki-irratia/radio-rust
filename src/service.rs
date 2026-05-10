@@ -4,13 +4,13 @@ use gstreamer::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::playback::{
-    PlaybackStart, apply_live_audio_state, build_playbin, resolve_effective_audio,
-    start_playbin_at_offset, validate_playback_source,
+    PlaybackStart, apply_live_audio_state, build_playbin_from_source, expand_playback_sources,
+    resolve_effective_audio, start_playbin_at_offset, validate_playback_source,
 };
 use crate::schedule::{load_schedule, save_schedule, sort_schedule_entries, validate_volume};
 use crate::types::{
@@ -351,21 +351,59 @@ fn play_entry_with_service_control(
     db_path: &Path,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
-    let file = PathBuf::from(&entry.file);
-    validate_playback_source(&entry.file)?;
-
     validate_volume(entry.volume)?;
     let start_offset = scheduled_start_offset(entry);
-    let playbin = build_playbin(&file)?;
-    apply_live_audio_state(
-        &playbin,
-        entry.fade_in_secs,
-        entry.volume,
-        entry.mute,
-        *overrides,
-    );
+    let sources = expand_playback_sources(&entry.file)?;
 
-    if start_playbin_at_offset(&playbin, &entry.file, start_offset)? == PlaybackStart::PastEnd {
+    for (index, source) in sources.iter().enumerate() {
+        state.now_playing = Some(source.clone());
+        let outcome = play_source_with_service_control(
+            entry,
+            source,
+            if index == 0 { entry.fade_in_secs } else { 0 },
+            if index + 1 == sources.len() {
+                entry.fade_out_secs
+            } else {
+                0
+            },
+            if index == 0 {
+                start_offset
+            } else {
+                Duration::ZERO
+            },
+            listener,
+            overrides,
+            state,
+            db_path,
+            queued_items,
+        )?;
+
+        if outcome != ServiceDirective::Continue {
+            return Ok(outcome);
+        }
+    }
+
+    Ok(ServiceDirective::Continue)
+}
+
+fn play_source_with_service_control(
+    entry: &ScheduleEntry,
+    source: &str,
+    fade_in_secs: u64,
+    fade_out_secs: u64,
+    start_offset: Duration,
+    listener: &UnixListener,
+    overrides: &mut LiveOverrides,
+    state: &mut ServiceState,
+    db_path: &Path,
+    queued_items: usize,
+) -> Result<ServiceDirective> {
+    validate_playback_source(source)?;
+
+    let playbin = build_playbin_from_source(source)?;
+    apply_live_audio_state(&playbin, fade_in_secs, entry.volume, entry.mute, *overrides);
+
+    if start_playbin_at_offset(&playbin, source, start_offset)? == PlaybackStart::PastEnd {
         println!(
             "Skipping #{} because offset {}s is past the end",
             entry.id,
@@ -377,10 +415,10 @@ fn play_entry_with_service_control(
     println!(
         "Playing {} {} (offset {}s, fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
         label,
-        file.display(),
+        source,
         start_offset.as_secs(),
-        entry.fade_in_secs,
-        entry.fade_out_secs,
+        fade_in_secs,
+        fade_out_secs,
         entry.volume,
         entry.mute
     );
@@ -479,13 +517,12 @@ fn play_entry_with_service_control(
         };
         playbin.set_property("mute", effective_mute);
 
-        if fade_out_start.is_none() && entry.fade_in_secs > 0 && !effective_mute {
-            let ratio =
-                (fade_in_start.elapsed().as_secs_f64() / entry.fade_in_secs as f64).min(1.0);
+        if fade_out_start.is_none() && fade_in_secs > 0 && !effective_mute {
+            let ratio = (fade_in_start.elapsed().as_secs_f64() / fade_in_secs as f64).min(1.0);
             playbin.set_property("volume", target_volume * ratio);
         }
 
-        if entry.fade_out_secs > 0 && fade_out_start.is_none() {
+        if fade_out_secs > 0 && fade_out_start.is_none() {
             if let (Some(duration), Some(position)) = (
                 playbin.query_duration::<gst::ClockTime>(),
                 playbin.query_position::<gst::ClockTime>(),
@@ -494,7 +531,7 @@ fn play_entry_with_service_control(
                 let position_ns = position.nseconds();
                 if duration_ns > position_ns {
                     let remaining_secs = (duration_ns - position_ns) as f64 / 1_000_000_000.0;
-                    if remaining_secs <= entry.fade_out_secs as f64 {
+                    if remaining_secs <= fade_out_secs as f64 {
                         fade_out_start = Some(Instant::now());
                     }
                 }
@@ -502,9 +539,9 @@ fn play_entry_with_service_control(
         }
 
         if let Some(started) = fade_out_start {
-            let ratio = (started.elapsed().as_secs_f64() / entry.fade_out_secs as f64).min(1.0);
+            let ratio = (started.elapsed().as_secs_f64() / fade_out_secs as f64).min(1.0);
             playbin.set_property("volume", target_volume * (1.0 - ratio));
-        } else if entry.fade_in_secs == 0 || effective_mute {
+        } else if fade_in_secs == 0 || effective_mute {
             playbin.set_property("volume", target_volume);
         }
     }
