@@ -433,19 +433,22 @@ fn play_entry_with_service_control(
             }
         }
 
-        if has_due_replacement(db_path, entry.id)? {
+        if let Some(replacement) = pending_replacement(db_path, entry.id, entry.fade_out_secs)? {
             let (effective_volume, effective_mute) =
                 resolve_effective_audio(entry.volume, entry.mute, *overrides);
             fade_out_pipeline(
                 &playbin,
-                entry.fade_out_secs,
+                replacement.fade_out_duration,
                 if effective_mute {
                     0.0
                 } else {
                     effective_volume
                 },
             );
-            println!("Due scheduled item is replacing {}", label);
+            println!(
+                "Scheduled item #{} is replacing {}",
+                replacement.entry_id, label
+            );
             return Ok(ServiceDirective::ReplaceCurrent);
         }
 
@@ -512,13 +515,33 @@ fn play_entry_with_service_control(
     Ok(ServiceDirective::Continue)
 }
 
-fn has_due_replacement(db_path: &Path, current_id: u64) -> Result<bool> {
+struct PendingReplacement {
+    entry_id: u64,
+    fade_out_duration: u64,
+}
+
+fn pending_replacement(
+    db_path: &Path,
+    current_id: u64,
+    current_fade_out_secs: u64,
+) -> Result<Option<PendingReplacement>> {
     let now = chrono::Local::now();
     let db = load_schedule(db_path)?;
+    let fade_window = chrono::Duration::seconds(current_fade_out_secs as i64);
     Ok(db
         .entries
         .iter()
-        .any(|entry| entry.id != current_id && entry.at <= now))
+        .find(|entry| entry.id != current_id && entry.at <= now + fade_window)
+        .map(|entry| {
+            let remaining_secs = (entry.at - now)
+                .to_std()
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            PendingReplacement {
+                entry_id: entry.id,
+                fade_out_duration: remaining_secs.min(current_fade_out_secs),
+            }
+        }))
 }
 
 fn remove_schedule_entry(db_path: &Path, id: u64) -> Result<()> {
