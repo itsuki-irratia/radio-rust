@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, LocalResult, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone};
 use gstreamer as gst;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::playback::play_file_with_fades;
+use crate::playback::{canonical_playback_source, play_file_with_fades};
 use crate::types::{SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry};
 
 pub fn run_scan(folder: &Path, json: bool) -> Result<()> {
@@ -54,27 +54,20 @@ pub fn run_schedule_add(
     volume: f64,
     mute: bool,
 ) -> Result<()> {
-    if !file.exists() {
-        bail!("File does not exist: {}", file.display());
-    }
-    if !file.is_file() {
-        bail!("Path is not a file: {}", file.display());
-    }
-    if !is_supported_media_file(file) {
+    let source = file.display().to_string();
+    let canonical_source = canonical_playback_source(&source)?;
+    if !is_remote_media_source(&canonical_source) && !is_supported_media_file(file) {
         bail!("Unsupported media extension for {}", file.display());
     }
     validate_volume(volume)?;
 
     let at_dt = parse_scheduled_datetime(at)?;
-    let absolute = file
-        .canonicalize()
-        .with_context(|| format!("Failed to canonicalize file {}", file.display()))?;
     let mut db = load_schedule(db_path)?;
 
     let next_id = db.entries.iter().map(|entry| entry.id).max().unwrap_or(0) + 1;
     db.entries.push(ScheduleEntry {
         id: next_id,
-        file: absolute.display().to_string(),
+        file: canonical_source.clone(),
         at: at_dt,
         fade_in_secs: fade_in,
         fade_out_secs: fade_out,
@@ -92,7 +85,7 @@ pub fn run_schedule_add(
         fade_out,
         volume,
         mute,
-        absolute.display()
+        canonical_source
     );
     Ok(())
 }
@@ -233,9 +226,20 @@ fn is_supported_media_file(path: &Path) -> bool {
     SUPPORTED_EXTENSIONS.contains(&extension_lower.as_str())
 }
 
+fn is_remote_media_source(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://")
+}
+
 fn parse_scheduled_datetime(input: &str) -> Result<DateTime<Local>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(input) {
         return Ok(dt.with_timezone(&Local));
+    }
+
+    for format in ["%H:%M:%S", "%H:%M"] {
+        if let Ok(time) = NaiveTime::parse_from_str(input, format) {
+            let naive = Local::now().date_naive().and_time(time);
+            return resolve_local_datetime(naive, input);
+        }
     }
 
     for format in [
@@ -245,19 +249,23 @@ fn parse_scheduled_datetime(input: &str) -> Result<DateTime<Local>> {
         "%Y-%m-%dT%H:%M",
     ] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(input, format) {
-            return match Local.from_local_datetime(&naive) {
-                LocalResult::Single(dt) => Ok(dt),
-                LocalResult::Ambiguous(a, b) => bail!(
-                    "Ambiguous local datetime (DST overlap): {} or {}",
-                    a.to_rfc3339(),
-                    b.to_rfc3339()
-                ),
-                LocalResult::None => bail!("Invalid local datetime for your timezone: {input}"),
-            };
+            return resolve_local_datetime(naive, input);
         }
     }
 
     bail!(
         "Invalid datetime format: {input}. Use RFC3339 like 2026-05-10T21:30:00+02:00 or local form YYYY-MM-DD HH:MM[:SS]"
     )
+}
+
+fn resolve_local_datetime(naive: NaiveDateTime, input: &str) -> Result<DateTime<Local>> {
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => Ok(dt),
+        LocalResult::Ambiguous(a, b) => bail!(
+            "Ambiguous local datetime (DST overlap): {} or {}",
+            a.to_rfc3339(),
+            b.to_rfc3339()
+        ),
+        LocalResult::None => bail!("Invalid local datetime for your timezone: {input}"),
+    }
 }

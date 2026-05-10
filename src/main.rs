@@ -9,7 +9,6 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Commands, ScheduleCommands, ServiceCommands};
-use crate::playback::play_file_with_fades;
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
@@ -19,13 +18,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Scan { folder, json } => run_scan(&folder, json),
-        Commands::Play {
-            file,
-            fade_in,
-            fade_out,
-            volume,
-            mute,
-        } => play_file_with_fades(&file, fade_in, fade_out, volume, mute),
         Commands::Schedule { command } => run_schedule_command(command),
         Commands::Service { command } => run_service_command(command),
         Commands::Gui => {
@@ -54,6 +46,11 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
 fn run_service_command(command: ServiceCommands) -> Result<()> {
     match command {
         ServiceCommands::Run { db, socket } => run_service(&db, &socket),
+        ServiceCommands::Play { socket } => {
+            let response = send_service_command(&socket, "play")?;
+            print!("{response}");
+            Ok(())
+        }
         ServiceCommands::Status { socket } => {
             let response = send_service_command(&socket, "status")?;
             print!("{response}");
@@ -82,6 +79,11 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
         }
         ServiceCommands::Stop { socket } => {
             let response = send_service_command(&socket, "stop")?;
+            print!("{response}");
+            Ok(())
+        }
+        ServiceCommands::Shutdown { socket } => {
+            let response = send_service_command(&socket, "shutdown")?;
             print!("{response}");
             Ok(())
         }

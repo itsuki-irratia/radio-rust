@@ -42,6 +42,7 @@ pub struct LiveOverrides {
 pub struct ServiceState {
     pub now_playing: Option<String>,
     pub now_playing_id: Option<u64>,
+    pub audio_enabled: bool,
 }
 
 impl ServiceState {
@@ -49,6 +50,7 @@ impl ServiceState {
         Self {
             now_playing: None,
             now_playing_id: None,
+            audio_enabled: true,
         }
     }
 }
@@ -57,6 +59,7 @@ impl ServiceState {
 pub enum ServiceDirective {
     Continue,
     SkipCurrent,
+    StopAudio,
     StopService,
 }
 

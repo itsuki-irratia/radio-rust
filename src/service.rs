@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Instant;
 
-use crate::playback::{apply_live_audio_state, build_playbin, resolve_effective_audio};
+use crate::playback::{
+    apply_live_audio_state, build_playbin, resolve_effective_audio, validate_playback_source,
+};
 use crate::schedule::{load_schedule, save_schedule, sort_schedule_entries, validate_volume};
 use crate::types::{
     FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
@@ -29,17 +31,27 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
     loop {
         let mut db = load_schedule(db_path)?;
         sort_schedule_entries(&mut db.entries);
-        let directive =
-            process_pending_service_commands(&listener, &mut overrides, &state, db.entries.len())?;
-        if let ServiceDirective::StopService = directive {
-            println!("Service stop requested.");
-            break;
+
+        let directive = process_pending_service_commands(
+            &listener,
+            &mut overrides,
+            &mut state,
+            db.entries.len(),
+        )?;
+        match directive {
+            ServiceDirective::Continue
+            | ServiceDirective::SkipCurrent
+            | ServiceDirective::StopAudio => {}
+            ServiceDirective::StopService => {
+                println!("Service shutdown requested.");
+                break;
+            }
         }
 
         let now = chrono::Local::now();
         let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
 
-        let Some(entry) = next_due else {
+        let Some(entry) = next_due.filter(|_| state.audio_enabled) else {
             state.now_playing = None;
             state.now_playing_id = None;
             thread::sleep(std::time::Duration::from_millis(SERVICE_TICK_MS));
@@ -53,7 +65,7 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
             &entry,
             &listener,
             &mut overrides,
-            &state,
+            &mut state,
             db.entries.len(),
         )?;
 
@@ -64,8 +76,11 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
                 println!("Completed and removed #{}", entry.id);
             }
             ServiceDirective::StopService => {
-                println!("Service stop requested during playback.");
+                println!("Service shutdown requested during playback.");
                 break;
+            }
+            ServiceDirective::StopAudio => {
+                println!("Playback stopped for #{}", entry.id);
             }
         }
 
@@ -141,7 +156,7 @@ fn bind_service_socket(socket_path: &Path) -> Result<UnixListener> {
 fn process_pending_service_commands(
     listener: &UnixListener,
     overrides: &mut LiveOverrides,
-    state: &ServiceState,
+    state: &mut ServiceState,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
     let mut aggregate = ServiceDirective::Continue;
@@ -150,13 +165,7 @@ fn process_pending_service_commands(
         match listener.accept() {
             Ok((stream, _)) => {
                 let directive = handle_service_stream(stream, overrides, state, queued_items)?;
-                aggregate = match (aggregate, directive) {
-                    (_, ServiceDirective::StopService) => ServiceDirective::StopService,
-                    (ServiceDirective::StopService, _) => ServiceDirective::StopService,
-                    (_, ServiceDirective::SkipCurrent) => ServiceDirective::SkipCurrent,
-                    (ServiceDirective::SkipCurrent, _) => ServiceDirective::SkipCurrent,
-                    _ => ServiceDirective::Continue,
-                };
+                aggregate = merge_service_directive(aggregate, directive);
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => break,
             Err(error) => return Err(error).context("Service socket accept failed"),
@@ -166,10 +175,28 @@ fn process_pending_service_commands(
     Ok(aggregate)
 }
 
+fn merge_service_directive(
+    aggregate: ServiceDirective,
+    directive: ServiceDirective,
+) -> ServiceDirective {
+    match (aggregate, directive) {
+        (_, ServiceDirective::StopService) | (ServiceDirective::StopService, _) => {
+            ServiceDirective::StopService
+        }
+        (_, ServiceDirective::StopAudio) | (ServiceDirective::StopAudio, _) => {
+            ServiceDirective::StopAudio
+        }
+        (_, ServiceDirective::SkipCurrent) | (ServiceDirective::SkipCurrent, _) => {
+            ServiceDirective::SkipCurrent
+        }
+        _ => ServiceDirective::Continue,
+    }
+}
+
 fn handle_service_stream(
     mut stream: UnixStream,
     overrides: &mut LiveOverrides,
-    state: &ServiceState,
+    state: &mut ServiceState,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
     let mut command = String::new();
@@ -196,7 +223,7 @@ fn handle_service_stream(
 fn handle_service_command(
     command: &str,
     overrides: &mut LiveOverrides,
-    state: &ServiceState,
+    state: &mut ServiceState,
     queued_items: usize,
 ) -> Result<(String, ServiceDirective)> {
     if command.is_empty() {
@@ -229,10 +256,22 @@ fn handle_service_command(
                 .mute
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "none".to_string());
+            let audio = if state.audio_enabled {
+                "enabled"
+            } else {
+                "stopped"
+            };
             let response = format!(
-                "ok: running now_playing_id={now_id} now_playing={now_playing} queued_items={queued_items} override_volume={override_volume} override_mute={override_mute}\n"
+                "ok: running audio={audio} now_playing_id={now_id} now_playing={now_playing} queued_items={queued_items} override_volume={override_volume} override_mute={override_mute}\n"
             );
             Ok((response, ServiceDirective::Continue))
+        }
+        "play" => {
+            state.audio_enabled = true;
+            Ok((
+                "ok: audio playback enabled\n".to_string(),
+                ServiceDirective::Continue,
+            ))
         }
         "set-volume" => {
             let Some(value_text) = parts.next() else {
@@ -270,14 +309,24 @@ fn handle_service_command(
             ))
         }
         "skip" => Ok(("ok: skip requested\n".to_string(), ServiceDirective::SkipCurrent)),
-        "stop" => Ok(("ok: stop requested\n".to_string(), ServiceDirective::StopService)),
+        "stop" => {
+            state.audio_enabled = false;
+            Ok((
+                "ok: audio playback stopped\n".to_string(),
+                ServiceDirective::StopAudio,
+            ))
+        }
+        "shutdown" => Ok((
+            "ok: service shutdown requested\n".to_string(),
+            ServiceDirective::StopService,
+        )),
         "help" => Ok((
-            "ok: commands: status | set-volume <0.0..1.0> | mute [on|off] | skip | stop\n"
+            "ok: commands: status | play | stop | set-volume <0.0..1.0> | mute [on|off] | skip | shutdown\n"
                 .to_string(),
             ServiceDirective::Continue,
         )),
         _ => Ok((
-            "error: unknown command. use: status | set-volume <0.0..1.0> | mute [on|off] | skip | stop\n".to_string(),
+            "error: unknown command. use: status | play | stop | set-volume <0.0..1.0> | mute [on|off] | skip | shutdown\n".to_string(),
             ServiceDirective::Continue,
         )),
     }
@@ -287,13 +336,11 @@ fn play_entry_with_service_control(
     entry: &ScheduleEntry,
     listener: &UnixListener,
     overrides: &mut LiveOverrides,
-    state: &ServiceState,
+    state: &mut ServiceState,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
     let file = PathBuf::from(&entry.file);
-    if !file.exists() || !file.is_file() {
-        bail!("Scheduled file is missing or invalid: {}", file.display());
-    }
+    validate_playback_source(&entry.file)?;
 
     validate_volume(entry.volume)?;
     let playbin = build_playbin(&file)?;
@@ -308,9 +355,10 @@ fn play_entry_with_service_control(
     playbin
         .set_state(gst::State::Playing)
         .context("Failed to set playback state to Playing")?;
+    let label = format!("#{}", entry.id);
     println!(
-        "Playing #{} {} (fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
-        entry.id,
+        "Playing {} {} (fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
+        label,
         file.display(),
         entry.fade_in_secs,
         entry.fade_out_secs,
@@ -331,13 +379,20 @@ fn play_entry_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on skip request")?;
-                println!("Skip requested for #{}", entry.id);
+                println!("Skip requested for {}", label);
                 return Ok(ServiceDirective::SkipCurrent);
+            }
+            ServiceDirective::StopAudio => {
+                playbin
+                    .set_state(gst::State::Null)
+                    .context("Failed to stop pipeline on audio stop request")?;
+                println!("Stop requested for {}", label);
+                return Ok(ServiceDirective::StopAudio);
             }
             ServiceDirective::StopService => {
                 playbin
                     .set_state(gst::State::Null)
-                    .context("Failed to stop pipeline on stop request")?;
+                    .context("Failed to stop pipeline on shutdown request")?;
                 return Ok(ServiceDirective::StopService);
             }
         }

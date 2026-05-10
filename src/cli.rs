@@ -17,17 +17,6 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    Play {
-        file: PathBuf,
-        #[arg(long, default_value_t = 5)]
-        fade_in: u64,
-        #[arg(long, default_value_t = 5)]
-        fade_out: u64,
-        #[arg(long, default_value_t = DEFAULT_VOLUME)]
-        volume: f64,
-        #[arg(long, default_value_t = false)]
-        mute: bool,
-    },
     Schedule {
         #[command(subcommand)]
         command: ScheduleCommands,
@@ -76,6 +65,10 @@ pub enum ServiceCommands {
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
     },
+    Play {
+        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
+        socket: PathBuf,
+    },
     Status {
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
@@ -98,6 +91,10 @@ pub enum ServiceCommands {
         socket: PathBuf,
     },
     Stop {
+        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
+        socket: PathBuf,
+    },
+    Shutdown {
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
     },

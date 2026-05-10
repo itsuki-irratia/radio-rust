@@ -14,12 +14,7 @@ pub fn play_file_with_fades(
     volume: f64,
     mute: bool,
 ) -> Result<()> {
-    if !file.exists() {
-        bail!("File does not exist: {}", file.display());
-    }
-    if !file.is_file() {
-        bail!("Path is not a file: {}", file.display());
-    }
+    validate_playback_source(&file.display().to_string())?;
     validate_volume(volume)?;
 
     gst::init().context("Failed to initialize GStreamer")?;
@@ -136,12 +131,61 @@ pub fn build_playbin(file: &Path) -> Result<gst::Element> {
         .build()
         .context("Could not create GStreamer playbin element")?;
 
-    let absolute = file
-        .canonicalize()
-        .with_context(|| format!("Failed to canonicalize file {}", file.display()))?;
-    let uri = gst::glib::filename_to_uri(absolute, None)
-        .context("Failed to convert file path into URI")?;
+    let source = file.display().to_string();
+    let uri = source_to_uri(&source)?;
     playbin.set_property("uri", uri.as_str());
 
     Ok(playbin)
+}
+
+pub fn canonical_playback_source(source: &str) -> Result<String> {
+    if is_remote_media_source(source) {
+        return Ok(source.to_string());
+    }
+
+    let path = Path::new(source);
+    if !path.exists() {
+        bail!("File does not exist: {}", path.display());
+    }
+    if !path.is_file() {
+        bail!("Path is not a file: {}", path.display());
+    }
+
+    Ok(path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize file {}", path.display()))?
+        .display()
+        .to_string())
+}
+
+pub fn validate_playback_source(source: &str) -> Result<()> {
+    if is_remote_media_source(source) {
+        return Ok(());
+    }
+
+    let path = Path::new(source);
+    if !path.exists() {
+        bail!("File does not exist: {}", path.display());
+    }
+    if !path.is_file() {
+        bail!("Path is not a file: {}", path.display());
+    }
+    Ok(())
+}
+
+fn source_to_uri(source: &str) -> Result<String> {
+    if is_remote_media_source(source) {
+        return Ok(source.to_string());
+    }
+
+    let absolute = Path::new(source)
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize file {source}"))?;
+    gst::glib::filename_to_uri(absolute, None)
+        .map(|uri| uri.to_string())
+        .context("Failed to convert file path into URI")
+}
+
+fn is_remote_media_source(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://")
 }

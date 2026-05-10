@@ -42,32 +42,6 @@ JSON output:
 cargo run -- scan /path/to/music --json
 ```
 
-### Play a file now
-
-Defaults:
-- `--fade-in 5`
-- `--fade-out 5`
-- `--volume 1.0`
-- `--mute false`
-
-```bash
-cargo run -- play "/path/to/song.mp3"
-```
-
-Custom fade/volume:
-
-```bash
-cargo run -- play "/path/to/song.mp3" --fade-in 3 --fade-out 4 --volume 0.35
-```
-
-Muted playback:
-
-```bash
-cargo run -- play "/path/to/song.mp3" --mute
-```
-
-`volume` must be between `0.0` and `1.0`.
-
 ### Scheduler
 
 The default schedule file is:
@@ -146,6 +120,15 @@ Service status:
 cargo run -- service status
 ```
 
+Enable scheduled audio playback in the running service:
+
+```bash
+cargo run -- service play
+```
+
+The service only plays scheduled items. If playback was stopped and a scheduled item is due,
+`service play` starts it from the schedule.
+
 Set live output volume (applies to current and next tracks while service is running):
 
 ```bash
@@ -165,10 +148,18 @@ Skip current track:
 cargo run -- service skip
 ```
 
-Stop service:
+Stop audio playback while keeping the service running:
 
 ```bash
 cargo run -- service stop
+```
+
+Stopped audio stays stopped until `service play`; scheduled items remain in the schedule.
+
+Shut down the service process:
+
+```bash
+cargo run -- service shutdown
 ```
 
 Use a custom socket with control commands:
@@ -258,7 +249,6 @@ For local datetimes, your machine timezone is used.
 - Paths with spaces should be quoted:
   - `"/home/zital/The Old Ways (Nights from the Alhambra Live) [3rztcvAlfFw].mp3"`
 - Show help for any subcommand:
-  - `cargo run -- play --help`
   - `cargo run -- schedule --help`
   - `cargo run -- schedule add --help`
   - `cargo run -- service --help`
