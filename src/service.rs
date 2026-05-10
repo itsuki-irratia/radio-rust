@@ -1,0 +1,406 @@
+use anyhow::{Context, Result, bail};
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use std::fs;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Instant;
+
+use crate::playback::{apply_live_audio_state, build_playbin, resolve_effective_audio};
+use crate::schedule::{load_schedule, save_schedule, sort_schedule_entries, validate_volume};
+use crate::types::{
+    FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
+};
+
+pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
+    gst::init().context("Failed to initialize GStreamer")?;
+    let listener = bind_service_socket(socket_path)?;
+    let mut overrides = LiveOverrides::default();
+    let mut state = ServiceState::new();
+
+    println!(
+        "Service running. socket={} schedule_db={}",
+        socket_path.display(),
+        db_path.display()
+    );
+
+    loop {
+        let mut db = load_schedule(db_path)?;
+        sort_schedule_entries(&mut db.entries);
+        let directive =
+            process_pending_service_commands(&listener, &mut overrides, &state, db.entries.len())?;
+        if let ServiceDirective::StopService = directive {
+            println!("Service stop requested.");
+            break;
+        }
+
+        let now = chrono::Local::now();
+        let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
+
+        let Some(entry) = next_due else {
+            state.now_playing = None;
+            state.now_playing_id = None;
+            thread::sleep(std::time::Duration::from_millis(SERVICE_TICK_MS));
+            continue;
+        };
+
+        state.now_playing = Some(entry.file.clone());
+        state.now_playing_id = Some(entry.id);
+
+        let outcome = play_entry_with_service_control(
+            &entry,
+            &listener,
+            &mut overrides,
+            &state,
+            db.entries.len(),
+        )?;
+
+        match outcome {
+            ServiceDirective::Continue | ServiceDirective::SkipCurrent => {
+                db.entries.retain(|item| item.id != entry.id);
+                save_schedule(db_path, &db)?;
+                println!("Completed and removed #{}", entry.id);
+            }
+            ServiceDirective::StopService => {
+                println!("Service stop requested during playback.");
+                break;
+            }
+        }
+
+        state.now_playing = None;
+        state.now_playing_id = None;
+    }
+
+    if socket_path.exists() {
+        fs::remove_file(socket_path).with_context(|| {
+            format!(
+                "Failed to remove service socket after shutdown: {}",
+                socket_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+pub fn send_service_command(socket_path: &Path, command: &str) -> Result<String> {
+    let mut stream = UnixStream::connect(socket_path).with_context(|| {
+        format!(
+            "Failed to connect to service socket {}. Is `radio-fm service run` active?",
+            socket_path.display()
+        )
+    })?;
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .context("Failed to send command to service")?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("Failed to close service command write side")?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("Failed to read response from service")?;
+        if bytes == 0 {
+            break;
+        }
+        response.push_str(&line);
+    }
+    if response.is_empty() {
+        response = "error: empty response from service\n".to_string();
+    }
+    Ok(response)
+}
+
+fn bind_service_socket(socket_path: &Path) -> Result<UnixListener> {
+    if socket_path.exists() {
+        fs::remove_file(socket_path).with_context(|| {
+            format!(
+                "Failed to remove previous socket file {}",
+                socket_path.display()
+            )
+        })?;
+    }
+    let listener = UnixListener::bind(socket_path).with_context(|| {
+        format!(
+            "Failed to bind service control socket at {}",
+            socket_path.display()
+        )
+    })?;
+    listener
+        .set_nonblocking(true)
+        .context("Failed to set service socket non-blocking mode")?;
+    Ok(listener)
+}
+
+fn process_pending_service_commands(
+    listener: &UnixListener,
+    overrides: &mut LiveOverrides,
+    state: &ServiceState,
+    queued_items: usize,
+) -> Result<ServiceDirective> {
+    let mut aggregate = ServiceDirective::Continue;
+
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let directive = handle_service_stream(stream, overrides, state, queued_items)?;
+                aggregate = match (aggregate, directive) {
+                    (_, ServiceDirective::StopService) => ServiceDirective::StopService,
+                    (ServiceDirective::StopService, _) => ServiceDirective::StopService,
+                    (_, ServiceDirective::SkipCurrent) => ServiceDirective::SkipCurrent,
+                    (ServiceDirective::SkipCurrent, _) => ServiceDirective::SkipCurrent,
+                    _ => ServiceDirective::Continue,
+                };
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error).context("Service socket accept failed"),
+        }
+    }
+
+    Ok(aggregate)
+}
+
+fn handle_service_stream(
+    mut stream: UnixStream,
+    overrides: &mut LiveOverrides,
+    state: &ServiceState,
+    queued_items: usize,
+) -> Result<ServiceDirective> {
+    let mut command = String::new();
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .context("Failed to clone service stream for reading")?,
+    );
+    reader
+        .read_line(&mut command)
+        .context("Failed reading service command")?;
+
+    let (response, directive) =
+        handle_service_command(command.trim(), overrides, state, queued_items)?;
+    stream
+        .write_all(response.as_bytes())
+        .context("Failed writing service response")?;
+    stream
+        .flush()
+        .context("Failed flushing service response stream")?;
+    Ok(directive)
+}
+
+fn handle_service_command(
+    command: &str,
+    overrides: &mut LiveOverrides,
+    state: &ServiceState,
+    queued_items: usize,
+) -> Result<(String, ServiceDirective)> {
+    if command.is_empty() {
+        return Ok((
+            "error: empty command\n".to_string(),
+            ServiceDirective::Continue,
+        ));
+    }
+
+    let mut parts = command.split_whitespace();
+    let Some(name) = parts.next() else {
+        return Ok((
+            "error: empty command\n".to_string(),
+            ServiceDirective::Continue,
+        ));
+    };
+
+    match name {
+        "status" => {
+            let now_playing = state.now_playing.as_deref().unwrap_or("none");
+            let now_id = state
+                .now_playing_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let override_volume = overrides
+                .volume
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "none".to_string());
+            let override_mute = overrides
+                .mute
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let response = format!(
+                "ok: running now_playing_id={now_id} now_playing={now_playing} queued_items={queued_items} override_volume={override_volume} override_mute={override_mute}\n"
+            );
+            Ok((response, ServiceDirective::Continue))
+        }
+        "set-volume" => {
+            let Some(value_text) = parts.next() else {
+                return Ok((
+                    "error: missing value. usage: set-volume <0.0..1.0>\n".to_string(),
+                    ServiceDirective::Continue,
+                ));
+            };
+            let value: f64 = value_text
+                .parse()
+                .with_context(|| format!("Invalid volume value: {value_text}"))?;
+            validate_volume(value)?;
+            overrides.volume = Some(value);
+            Ok((
+                format!("ok: override volume set to {value:.2}\n"),
+                ServiceDirective::Continue,
+            ))
+        }
+        "mute" => {
+            let mode = parts.next().unwrap_or("on");
+            let value = match mode {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                _ => {
+                    return Ok((
+                        "error: usage mute [on|off]\n".to_string(),
+                        ServiceDirective::Continue,
+                    ));
+                }
+            };
+            overrides.mute = Some(value);
+            Ok((
+                format!("ok: override mute set to {value}\n"),
+                ServiceDirective::Continue,
+            ))
+        }
+        "skip" => Ok(("ok: skip requested\n".to_string(), ServiceDirective::SkipCurrent)),
+        "stop" => Ok(("ok: stop requested\n".to_string(), ServiceDirective::StopService)),
+        "help" => Ok((
+            "ok: commands: status | set-volume <0.0..1.0> | mute [on|off] | skip | stop\n"
+                .to_string(),
+            ServiceDirective::Continue,
+        )),
+        _ => Ok((
+            "error: unknown command. use: status | set-volume <0.0..1.0> | mute [on|off] | skip | stop\n".to_string(),
+            ServiceDirective::Continue,
+        )),
+    }
+}
+
+fn play_entry_with_service_control(
+    entry: &ScheduleEntry,
+    listener: &UnixListener,
+    overrides: &mut LiveOverrides,
+    state: &ServiceState,
+    queued_items: usize,
+) -> Result<ServiceDirective> {
+    let file = PathBuf::from(&entry.file);
+    if !file.exists() || !file.is_file() {
+        bail!("Scheduled file is missing or invalid: {}", file.display());
+    }
+
+    validate_volume(entry.volume)?;
+    let playbin = build_playbin(&file)?;
+    apply_live_audio_state(
+        &playbin,
+        entry.fade_in_secs,
+        entry.volume,
+        entry.mute,
+        *overrides,
+    );
+
+    playbin
+        .set_state(gst::State::Playing)
+        .context("Failed to set playback state to Playing")?;
+    println!(
+        "Playing #{} {} (fade-in {}s, fade-out {}s, volume {:.2}, mute {})",
+        entry.id,
+        file.display(),
+        entry.fade_in_secs,
+        entry.fade_out_secs,
+        entry.volume,
+        entry.mute
+    );
+
+    let bus = playbin.bus().context("Pipeline has no message bus")?;
+    let fade_tick = gst::ClockTime::from_mseconds(FADE_TICK_MS);
+    let fade_in_start = Instant::now();
+    let mut fade_out_start: Option<Instant> = None;
+
+    loop {
+        let directive = process_pending_service_commands(listener, overrides, state, queued_items)?;
+        match directive {
+            ServiceDirective::Continue => {}
+            ServiceDirective::SkipCurrent => {
+                playbin
+                    .set_state(gst::State::Null)
+                    .context("Failed to stop pipeline on skip request")?;
+                println!("Skip requested for #{}", entry.id);
+                return Ok(ServiceDirective::SkipCurrent);
+            }
+            ServiceDirective::StopService => {
+                playbin
+                    .set_state(gst::State::Null)
+                    .context("Failed to stop pipeline on stop request")?;
+                return Ok(ServiceDirective::StopService);
+            }
+        }
+
+        if let Some(message) = bus.timed_pop(fade_tick) {
+            use gst::MessageView;
+            match message.view() {
+                MessageView::Eos(..) => break,
+                MessageView::Error(err) => {
+                    let src = err
+                        .src()
+                        .map(|s| s.path_string().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    playbin
+                        .set_state(gst::State::Null)
+                        .context("Failed to stop GStreamer pipeline after playback error")?;
+                    bail!("Playback error from {src}: {}", err.error());
+                }
+                _ => {}
+            }
+        }
+
+        let (effective_volume, effective_mute) =
+            resolve_effective_audio(entry.volume, entry.mute, *overrides);
+        let target_volume = if effective_mute {
+            0.0
+        } else {
+            effective_volume
+        };
+        playbin.set_property("mute", effective_mute);
+
+        if fade_out_start.is_none() && entry.fade_in_secs > 0 && !effective_mute {
+            let ratio =
+                (fade_in_start.elapsed().as_secs_f64() / entry.fade_in_secs as f64).min(1.0);
+            playbin.set_property("volume", target_volume * ratio);
+        }
+
+        if entry.fade_out_secs > 0 && fade_out_start.is_none() {
+            if let (Some(duration), Some(position)) = (
+                playbin.query_duration::<gst::ClockTime>(),
+                playbin.query_position::<gst::ClockTime>(),
+            ) {
+                let duration_ns = duration.nseconds();
+                let position_ns = position.nseconds();
+                if duration_ns > position_ns {
+                    let remaining_secs = (duration_ns - position_ns) as f64 / 1_000_000_000.0;
+                    if remaining_secs <= entry.fade_out_secs as f64 {
+                        fade_out_start = Some(Instant::now());
+                    }
+                }
+            }
+        }
+
+        if let Some(started) = fade_out_start {
+            let ratio = (started.elapsed().as_secs_f64() / entry.fade_out_secs as f64).min(1.0);
+            playbin.set_property("volume", target_volume * (1.0 - ratio));
+        } else if entry.fade_in_secs == 0 || effective_mute {
+            playbin.set_property("volume", target_volume);
+        }
+    }
+
+    playbin
+        .set_state(gst::State::Null)
+        .context("Failed to stop GStreamer pipeline")?;
+    Ok(ServiceDirective::Continue)
+}
