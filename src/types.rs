@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SUPPORTED_EXTENSIONS: &[&str] =
     &["mp3", "aac", "flac", "ogg", "opus", "wav", "m4a", "xspf"];
-pub const DEFAULT_SCHEDULE_FILE: &str = "radio-fm-schedule.json";
+pub const DEFAULT_SCHEDULE_DB: &str = "radio-fm-schedule.sqlite";
 pub const FADE_TICK_MS: u64 = 200;
 pub const DEFAULT_SERVICE_SOCKET: &str = "/tmp/radio-fm.sock";
 pub const SERVICE_TICK_MS: u64 = 250;

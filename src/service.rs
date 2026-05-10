@@ -12,7 +12,9 @@ use crate::playback::{
     PlaybackStart, apply_live_audio_state, build_playbin_from_source, expand_playback_sources,
     resolve_effective_audio, start_playbin_at_offset, validate_playback_source,
 };
-use crate::schedule::{load_schedule, save_schedule, sort_schedule_entries, validate_volume};
+use crate::schedule::{
+    load_schedule, remove_schedule_entry, sort_schedule_entries, validate_volume,
+};
 use crate::types::{
     FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
 };
@@ -579,12 +581,6 @@ fn pending_replacement(
                 fade_out_duration: remaining_secs.min(current_fade_out_secs),
             }
         }))
-}
-
-fn remove_schedule_entry(db_path: &Path, id: u64) -> Result<()> {
-    let mut db = load_schedule(db_path)?;
-    db.entries.retain(|item| item.id != id);
-    save_schedule(db_path, &db)
 }
 
 fn scheduled_start_offset(entry: &ScheduleEntry) -> Duration {

@@ -44,13 +44,15 @@ cargo run -- scan /path/to/music --json
 
 ### Scheduler
 
-The default schedule file is:
+The default schedule database is:
 
 ```text
-radio-fm-schedule.json
+radio-fm-schedule.sqlite
 ```
 
-You can override it with `--db /path/to/file.json`.
+You can override it with `--db /path/to/schedule.sqlite`.
+If the default database does not exist yet and a legacy `radio-fm-schedule.json`
+file is present beside it, the entries are imported once into SQLite.
 
 #### Add scheduled song
 
@@ -93,7 +95,7 @@ cargo run -- schedule list --json
 Starts a loop that:
 1. waits for the next schedule time
 2. plays the track with its fade/volume/mute settings
-3. removes it from the schedule file
+3. removes it from the schedule database
 
 ```bash
 cargo run -- schedule run
@@ -115,10 +117,10 @@ Start service in foreground:
 cargo run -- service run
 ```
 
-Start service with custom schedule file and socket:
+Start service with custom schedule database and socket:
 
 ```bash
-cargo run -- service run --db /path/to/radio-fm-schedule.json --socket /tmp/radio-fm-custom.sock
+cargo run -- service run --db /path/to/radio-fm-schedule.sqlite --socket /tmp/radio-fm-custom.sock
 ```
 
 Service status:
@@ -182,7 +184,7 @@ cargo run -- schedule add "/path/to/song.mp3" --at "2026-05-10 23:00:00"
 cargo run -- schedule list
 ```
 
-The running service reloads the schedule file continuously, so new entries are picked up automatically.
+The running service reloads the schedule database continuously, so new entries are picked up automatically.
 
 #### Run as a background systemd user service
 
@@ -202,7 +204,7 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=/home/zital/projects/radio-fm
-ExecStart=/home/zital/projects/radio-fm/target/release/radio-fm service run --db /home/zital/projects/radio-fm/radio-fm-schedule.json --socket /tmp/radio-fm.sock
+ExecStart=/home/zital/projects/radio-fm/target/release/radio-fm service run --db /home/zital/projects/radio-fm/radio-fm-schedule.sqlite --socket /tmp/radio-fm.sock
 Restart=always
 RestartSec=2
 

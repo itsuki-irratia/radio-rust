@@ -1,9 +1,12 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone};
 use gstreamer as gst;
+use rusqlite::types::Type;
+use rusqlite::{Connection, Row, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 
 use crate::playback::{
     canonical_playback_source, expand_playback_sources, is_xspf_source, play_file_with_fades_from,
@@ -67,20 +70,17 @@ pub fn run_schedule_add(
     validate_volume(volume)?;
 
     let at_dt = parse_scheduled_datetime(at)?;
-    let mut db = load_schedule(db_path)?;
-
-    let next_id = db.entries.iter().map(|entry| entry.id).max().unwrap_or(0) + 1;
-    db.entries.push(ScheduleEntry {
-        id: next_id,
+    let conn = open_schedule_db(db_path)?;
+    let entry = ScheduleEntry {
+        id: 0,
         file: canonical_source.clone(),
         at: at_dt,
         fade_in_secs: fade_in,
         fade_out_secs: fade_out,
         volume,
         mute,
-    });
-    sort_schedule_entries(&mut db.entries);
-    save_schedule(db_path, &db)?;
+    };
+    let next_id = insert_new_schedule_entry(&conn, &entry)?;
 
     println!(
         "Added #{} at {} | fade-in {}s | fade-out {}s | volume {:.2} | mute {} | {}",
@@ -165,30 +165,192 @@ pub fn run_schedule_run(db_path: &Path) -> Result<()> {
             start_offset,
         )?;
 
-        db.entries.retain(|entry| entry.id != next.id);
-        save_schedule(db_path, &db)?;
+        remove_schedule_entry(db_path, next.id)?;
         println!("Completed and removed #{}", next.id);
     }
 }
 
 pub fn load_schedule(db_path: &Path) -> Result<ScheduleDb> {
-    if !db_path.exists() {
-        return Ok(ScheduleDb::default());
-    }
-
-    let raw = fs::read_to_string(db_path)
-        .with_context(|| format!("Failed to read schedule file {}", db_path.display()))?;
-    let mut db: ScheduleDb = serde_json::from_str(&raw)
-        .with_context(|| format!("Failed to parse schedule file {}", db_path.display()))?;
-    sort_schedule_entries(&mut db.entries);
-    Ok(db)
+    let conn = open_schedule_db(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, file, at_rfc3339, fade_in_secs, fade_out_secs, volume, mute
+             FROM schedule_entries
+             ORDER BY at_unix_ms ASC, id ASC",
+        )
+        .context("Failed to prepare schedule query")?;
+    let entries = stmt
+        .query_map([], schedule_entry_from_row)
+        .context("Failed to query schedule entries")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to read schedule entries")?;
+    Ok(ScheduleDb { entries })
 }
 
-pub fn save_schedule(db_path: &Path, db: &ScheduleDb) -> Result<()> {
-    let raw = serde_json::to_string_pretty(db).context("Failed to serialize schedule file")?;
-    fs::write(db_path, raw)
-        .with_context(|| format!("Failed to write schedule file {}", db_path.display()))?;
+pub fn remove_schedule_entry(db_path: &Path, id: u64) -> Result<()> {
+    let conn = open_schedule_db(db_path)?;
+    let id = i64::try_from(id).context("Schedule id is too large for SQLite")?;
+    conn.execute("DELETE FROM schedule_entries WHERE id = ?1", params![id])
+        .context("Failed to remove schedule entry")?;
     Ok(())
+}
+
+fn open_schedule_db(db_path: &Path) -> Result<Connection> {
+    if let Some(parent) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create schedule database directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let db_existed = db_path.exists();
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("Failed to open schedule database {}", db_path.display()))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .context("Failed to configure schedule database busy timeout")?;
+    init_schedule_schema(&conn)?;
+    if !db_existed {
+        import_legacy_json_schedule(db_path, &conn)?;
+    }
+    Ok(conn)
+}
+
+fn init_schedule_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS schedule_entries (
+            id INTEGER PRIMARY KEY,
+            file TEXT NOT NULL,
+            at_unix_ms INTEGER NOT NULL,
+            at_rfc3339 TEXT NOT NULL,
+            fade_in_secs INTEGER NOT NULL,
+            fade_out_secs INTEGER NOT NULL,
+            volume REAL NOT NULL DEFAULT 1.0,
+            mute INTEGER NOT NULL DEFAULT 0 CHECK (mute IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS schedule_entries_at_idx
+            ON schedule_entries (at_unix_ms, id);
+        ",
+    )
+    .context("Failed to initialize schedule database schema")
+}
+
+fn import_legacy_json_schedule(db_path: &Path, conn: &Connection) -> Result<()> {
+    let legacy_path = db_path.with_extension("json");
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    let raw = fs::read_to_string(&legacy_path).with_context(|| {
+        format!(
+            "Failed to read legacy schedule file {}",
+            legacy_path.display()
+        )
+    })?;
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut db: ScheduleDb = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "Failed to parse legacy schedule file {}",
+            legacy_path.display()
+        )
+    })?;
+    sort_schedule_entries(&mut db.entries);
+    if db.entries.is_empty() {
+        return Ok(());
+    }
+
+    for entry in &db.entries {
+        insert_schedule_entry(conn, entry)?;
+    }
+    eprintln!(
+        "Imported {} scheduled item(s) from legacy JSON {} into {}",
+        db.entries.len(),
+        legacy_path.display(),
+        db_path.display()
+    );
+    Ok(())
+}
+
+fn insert_schedule_entry(conn: &Connection, entry: &ScheduleEntry) -> Result<()> {
+    let id = i64::try_from(entry.id).context("Schedule id is too large for SQLite")?;
+    let fade_in_secs =
+        i64::try_from(entry.fade_in_secs).context("Fade-in seconds are too large for SQLite")?;
+    let fade_out_secs =
+        i64::try_from(entry.fade_out_secs).context("Fade-out seconds are too large for SQLite")?;
+    conn.execute(
+        "INSERT INTO schedule_entries
+            (id, file, at_unix_ms, at_rfc3339, fade_in_secs, fade_out_secs, volume, mute)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            &entry.file,
+            entry.at.timestamp_millis(),
+            entry.at.to_rfc3339(),
+            fade_in_secs,
+            fade_out_secs,
+            entry.volume,
+            if entry.mute { 1 } else { 0 },
+        ],
+    )
+    .with_context(|| format!("Failed to insert schedule entry #{}", entry.id))?;
+    Ok(())
+}
+
+fn insert_new_schedule_entry(conn: &Connection, entry: &ScheduleEntry) -> Result<u64> {
+    let fade_in_secs =
+        i64::try_from(entry.fade_in_secs).context("Fade-in seconds are too large for SQLite")?;
+    let fade_out_secs =
+        i64::try_from(entry.fade_out_secs).context("Fade-out seconds are too large for SQLite")?;
+    conn.execute(
+        "INSERT INTO schedule_entries
+            (file, at_unix_ms, at_rfc3339, fade_in_secs, fade_out_secs, volume, mute)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &entry.file,
+            entry.at.timestamp_millis(),
+            entry.at.to_rfc3339(),
+            fade_in_secs,
+            fade_out_secs,
+            entry.volume,
+            if entry.mute { 1 } else { 0 },
+        ],
+    )
+    .context("Failed to insert schedule entry")?;
+
+    let id = conn.last_insert_rowid();
+    u64::try_from(id).context("SQLite returned an invalid schedule id")
+}
+
+fn schedule_entry_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduleEntry> {
+    let id: i64 = row.get(0)?;
+    let at_text: String = row.get(2)?;
+    let at = DateTime::parse_from_rfc3339(&at_text)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error)))?
+        .with_timezone(&Local);
+    let fade_in_secs: i64 = row.get(3)?;
+    let fade_out_secs: i64 = row.get(4)?;
+    let mute: i64 = row.get(6)?;
+
+    Ok(ScheduleEntry {
+        id: u64::try_from(id).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Integer, Box::new(error))
+        })?,
+        file: row.get(1)?,
+        at,
+        fade_in_secs: u64::try_from(fade_in_secs).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Integer, Box::new(error))
+        })?,
+        fade_out_secs: u64::try_from(fade_out_secs).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Integer, Box::new(error))
+        })?,
+        volume: row.get(5)?,
+        mute: mute != 0,
+    })
 }
 
 pub fn sort_schedule_entries(entries: &mut [ScheduleEntry]) {

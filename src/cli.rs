@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::types::{DEFAULT_SCHEDULE_FILE, DEFAULT_SERVICE_SOCKET, DEFAULT_VOLUME};
+use crate::types::{DEFAULT_SCHEDULE_DB, DEFAULT_SERVICE_SOCKET, DEFAULT_VOLUME};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Radio FM starter CLI + GUI")]
@@ -42,17 +42,17 @@ pub enum ScheduleCommands {
         volume: f64,
         #[arg(long, default_value_t = false)]
         mute: bool,
-        #[arg(long, default_value = DEFAULT_SCHEDULE_FILE)]
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
     },
     List {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_FILE)]
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
         #[arg(long)]
         json: bool,
     },
     Run {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_FILE)]
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
     },
 }
@@ -60,7 +60,7 @@ pub enum ScheduleCommands {
 #[derive(Subcommand, Debug)]
 pub enum ServiceCommands {
     Run {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_FILE)]
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
