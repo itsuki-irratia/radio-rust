@@ -166,6 +166,34 @@ JSON output:
 cargo run -- streams list --json
 ```
 
+### Greenwich time signal
+
+The service can play a configured audio source at second 00 of each minute. The
+source is stored in the same SQLite database as schedules, cron rules, and
+streams.
+
+Set the signal audio:
+
+```bash
+cargo run -- time-signal set-audio "/path/to/pips.mp3"
+```
+
+Enable or disable the minute signal:
+
+```bash
+cargo run -- time-signal enable
+cargo run -- time-signal disable
+```
+
+Show the current setting:
+
+```bash
+cargo run -- time-signal status
+cargo run -- time-signal status --json
+```
+
+The aliases `greenwich` and `greenwitch` also work for the top-level command.
+
 ### Service mode (recommended for background use)
 
 `service run` keeps a daemon process running and lets you control it from other terminals.

@@ -16,6 +16,7 @@ use crate::playback::{
 use crate::schedule::{
     load_schedule, remove_schedule_entry, sort_schedule_entries, validate_volume,
 };
+use crate::time_signal::{due_time_signal_tick, load_time_signal_config};
 use crate::types::{
     FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
 };
@@ -25,6 +26,8 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
     let listener = bind_service_socket(socket_path)?;
     let mut overrides = LiveOverrides::default();
     let mut state = ServiceState::new();
+    let mut last_time_signal_tick: Option<i64> = None;
+    let mut time_signal_overlays = Vec::new();
 
     println!(
         "Service running. socket={} schedule_db={}",
@@ -46,15 +49,27 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
         match directive {
             ServiceDirective::Continue
             | ServiceDirective::SkipCurrent
-            | ServiceDirective::StopAudio
             | ServiceDirective::ReplaceCurrent => {}
+            ServiceDirective::StopAudio => {
+                stop_time_signal_overlays(&mut time_signal_overlays);
+            }
             ServiceDirective::StopService => {
                 println!("Service shutdown requested.");
+                stop_time_signal_overlays(&mut time_signal_overlays);
                 break;
             }
         }
 
         let now = chrono::Local::now();
+        if state.audio_enabled {
+            maybe_start_time_signal_overlay(
+                db_path,
+                &mut last_time_signal_tick,
+                &mut time_signal_overlays,
+            );
+        }
+        poll_time_signal_overlays(&mut time_signal_overlays);
+
         let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
 
         let Some(entry) = next_due.filter(|_| state.audio_enabled) else {
@@ -74,6 +89,8 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
             &mut state,
             db_path,
             db.entries.len(),
+            &mut last_time_signal_tick,
+            &mut time_signal_overlays,
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -103,9 +120,11 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
             }
             ServiceDirective::StopService => {
                 println!("Service shutdown requested during playback.");
+                stop_time_signal_overlays(&mut time_signal_overlays);
                 break;
             }
             ServiceDirective::StopAudio => {
+                stop_time_signal_overlays(&mut time_signal_overlays);
                 println!("Playback stopped for #{}", entry.id);
             }
         }
@@ -368,6 +387,8 @@ fn play_entry_with_service_control(
     state: &mut ServiceState,
     db_path: &Path,
     queued_items: usize,
+    last_time_signal_tick: &mut Option<i64>,
+    time_signal_overlays: &mut Vec<TimeSignalOverlay>,
 ) -> Result<ServiceDirective> {
     validate_volume(entry.volume)?;
     let start_offset = scheduled_start_offset(entry);
@@ -394,6 +415,8 @@ fn play_entry_with_service_control(
             state,
             db_path,
             queued_items,
+            last_time_signal_tick,
+            time_signal_overlays,
         )?;
 
         if outcome != ServiceDirective::Continue {
@@ -415,6 +438,8 @@ fn play_source_with_service_control(
     state: &mut ServiceState,
     db_path: &Path,
     queued_items: usize,
+    last_time_signal_tick: &mut Option<i64>,
+    time_signal_overlays: &mut Vec<TimeSignalOverlay>,
 ) -> Result<ServiceDirective> {
     validate_playback_source(source)?;
 
@@ -449,6 +474,9 @@ fn play_source_with_service_control(
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
+        maybe_start_time_signal_overlay(db_path, last_time_signal_tick, time_signal_overlays);
+        poll_time_signal_overlays(time_signal_overlays);
+
         let directive = process_pending_service_commands(listener, overrides, state, queued_items)?;
         match directive {
             ServiceDirective::Continue => {}
@@ -456,6 +484,7 @@ fn play_source_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on skip request")?;
+                stop_time_signal_overlays(time_signal_overlays);
                 println!("Skip requested for {}", label);
                 return Ok(ServiceDirective::SkipCurrent);
             }
@@ -463,6 +492,7 @@ fn play_source_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on audio stop request")?;
+                stop_time_signal_overlays(time_signal_overlays);
                 println!("Stop requested for {}", label);
                 return Ok(ServiceDirective::StopAudio);
             }
@@ -470,6 +500,7 @@ fn play_source_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on shutdown request")?;
+                stop_time_signal_overlays(time_signal_overlays);
                 return Ok(ServiceDirective::StopService);
             }
             ServiceDirective::ReplaceCurrent => {
@@ -501,10 +532,7 @@ fn play_source_with_service_control(
                     effective_volume
                 },
             );
-            println!(
-                "Scheduled item #{} is replacing {}",
-                replacement.entry_id, label
-            );
+            println!("{} is replacing {}", replacement.label, label);
             return Ok(ServiceDirective::ReplaceCurrent);
         }
 
@@ -571,7 +599,7 @@ fn play_source_with_service_control(
 }
 
 struct PendingReplacement {
-    entry_id: u64,
+    label: String,
     fade_out_duration: u64,
 }
 
@@ -594,10 +622,121 @@ fn pending_replacement(
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0);
             PendingReplacement {
-                entry_id: entry.id,
+                label: format!("Scheduled item #{}", entry.id),
                 fade_out_duration: remaining_secs.min(current_fade_out_secs),
             }
         }))
+}
+
+struct TimeSignalOverlay {
+    source: String,
+    playbin: gst::Element,
+}
+
+fn maybe_start_time_signal_overlay(
+    db_path: &Path,
+    last_tick: &mut Option<i64>,
+    overlays: &mut Vec<TimeSignalOverlay>,
+) {
+    let now = chrono::Local::now();
+    let config = match load_time_signal_config(db_path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Failed to load Greenwich time signal config: {error:#}");
+            return;
+        }
+    };
+    let Some(tick) = due_time_signal_tick(&config, now, *last_tick) else {
+        return;
+    };
+
+    *last_tick = Some(tick);
+    let Some(source) = config.source else {
+        return;
+    };
+
+    let sources = match expand_playback_sources(&source) {
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("Failed to expand Greenwich time signal {source}: {error:#}");
+            return;
+        }
+    };
+
+    for source in sources {
+        match start_time_signal_overlay(&source) {
+            Ok(overlay) => {
+                println!("Playing Greenwich time signal overlay {source} for tick {tick}");
+                overlays.push(overlay);
+            }
+            Err(error) => {
+                eprintln!("Failed to play Greenwich time signal {source}: {error:#}. Continuing.");
+            }
+        }
+    }
+}
+
+fn start_time_signal_overlay(source: &str) -> Result<TimeSignalOverlay> {
+    validate_playback_source(source)?;
+    let playbin = build_playbin_from_source(source)?;
+    playbin.set_property("volume", 1.0f64);
+    playbin.set_property("mute", false);
+    playbin
+        .set_state(gst::State::Playing)
+        .context("Failed to set Greenwich time signal overlay to Playing")?;
+    Ok(TimeSignalOverlay {
+        source: source.to_string(),
+        playbin,
+    })
+}
+
+fn poll_time_signal_overlays(overlays: &mut Vec<TimeSignalOverlay>) {
+    overlays.retain_mut(|overlay| {
+        let Some(bus) = overlay.playbin.bus() else {
+            let _ = overlay.playbin.set_state(gst::State::Null);
+            eprintln!(
+                "Stopping Greenwich time signal overlay {} because it has no message bus",
+                overlay.source
+            );
+            return false;
+        };
+
+        let mut keep = true;
+        while let Some(message) = bus.timed_pop(gst::ClockTime::ZERO) {
+            use gst::MessageView;
+            match message.view() {
+                MessageView::Eos(..) => {
+                    let _ = overlay.playbin.set_state(gst::State::Null);
+                    println!("Completed Greenwich time signal overlay {}", overlay.source);
+                    keep = false;
+                    break;
+                }
+                MessageView::Error(err) => {
+                    let src = err
+                        .src()
+                        .map(|s| s.path_string().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let _ = overlay.playbin.set_state(gst::State::Null);
+                    eprintln!(
+                        "Greenwich time signal overlay error from {src} for {}: {}",
+                        overlay.source,
+                        err.error()
+                    );
+                    keep = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        keep
+    });
+}
+
+fn stop_time_signal_overlays(overlays: &mut Vec<TimeSignalOverlay>) {
+    for overlay in overlays.drain(..) {
+        let _ = overlay.playbin.set_state(gst::State::Null);
+    }
 }
 
 fn scheduled_start_offset(entry: &ScheduleEntry) -> Duration {

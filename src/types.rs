@@ -66,6 +66,12 @@ pub struct StreamDb {
     pub entries: Vec<StreamEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeSignalConfig {
+    pub enabled: bool,
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LiveOverrides {
     pub volume: Option<f64>,

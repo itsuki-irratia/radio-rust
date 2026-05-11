@@ -11,6 +11,7 @@ service with CLI controls for play, stop, mute, volume, and skip.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
+- Play a configurable Greenwich time signal at second 00 of each minute.
 - Control a running service through a Unix socket.
 
 ## Requirements
@@ -78,6 +79,27 @@ List named streams stored in the SQLite database:
 
 ```bash
 cargo run -- streams list
+```
+
+## Greenwich Time Signal
+
+Set the audio used for the minute time signal:
+
+```bash
+cargo run -- time-signal set-audio "/path/to/pips.mp3"
+```
+
+Enable or disable the minute signal:
+
+```bash
+cargo run -- time-signal enable
+cargo run -- time-signal disable
+```
+
+Check the current setting:
+
+```bash
+cargo run -- time-signal status
 ```
 
 ## Cron Playback

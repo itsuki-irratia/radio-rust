@@ -25,6 +25,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: StreamsCommands,
     },
+    #[command(name = "time-signal", aliases = ["greenwich", "greenwitch"])]
+    TimeSignal {
+        #[command(subcommand)]
+        command: TimeSignalCommands,
+    },
     Cron {
         #[command(subcommand)]
         command: CronCommands,
@@ -39,6 +44,29 @@ pub enum Commands {
 #[derive(Subcommand, Debug)]
 pub enum StreamsCommands {
     List {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TimeSignalCommands {
+    SetAudio {
+        source: String,
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
+    Enable {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
+    Disable {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
+    Status {
         #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
         #[arg(long)]

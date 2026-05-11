@@ -5,18 +5,26 @@ mod playback;
 mod schedule;
 mod service;
 mod streams;
+mod time_signal;
 mod types;
 
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::{Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands, StreamsCommands};
+use crate::cli::{
+    Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands, StreamsCommands,
+    TimeSignalCommands,
+};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
 use crate::service::{run_service, send_service_command};
 use crate::streams::run_streams_list;
+use crate::time_signal::{
+    run_time_signal_disable, run_time_signal_enable, run_time_signal_set_audio,
+    run_time_signal_status,
+};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -24,6 +32,7 @@ fn main() -> Result<()> {
         Commands::Scan { folder, json } => run_scan(&folder, json),
         Commands::Schedule { command } => run_schedule_command(command),
         Commands::Streams { command } => run_streams_command(command),
+        Commands::TimeSignal { command } => run_time_signal_command(command),
         Commands::Cron { command } => run_cron_command(command),
         Commands::Service { command } => run_service_command(command),
         Commands::Gui => {
@@ -58,6 +67,15 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
 fn run_streams_command(command: StreamsCommands) -> Result<()> {
     match command {
         StreamsCommands::List { db, json } => run_streams_list(&db, json),
+    }
+}
+
+fn run_time_signal_command(command: TimeSignalCommands) -> Result<()> {
+    match command {
+        TimeSignalCommands::SetAudio { source, db } => run_time_signal_set_audio(&db, &source),
+        TimeSignalCommands::Enable { db } => run_time_signal_enable(&db),
+        TimeSignalCommands::Disable { db } => run_time_signal_disable(&db),
+        TimeSignalCommands::Status { db, json } => run_time_signal_status(&db, json),
     }
 }
 
