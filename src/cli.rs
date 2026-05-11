@@ -21,6 +21,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: ScheduleCommands,
     },
+    Streams {
+        #[command(subcommand)]
+        command: StreamsCommands,
+    },
     Cron {
         #[command(subcommand)]
         command: CronCommands,
@@ -30,6 +34,16 @@ pub enum Commands {
         command: ServiceCommands,
     },
     Gui,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StreamsCommands {
+    List {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

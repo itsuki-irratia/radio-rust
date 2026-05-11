@@ -150,6 +150,22 @@ Cron items are stored in the same SQLite database. The service materializes the
 next matching cron occurrence into the normal one-shot schedule queue, so
 scheduled replacement/fade behavior stays the same.
 
+### Streams
+
+Named streams are stored in the same SQLite database as schedules and cron rules.
+
+List streams:
+
+```bash
+cargo run -- streams list
+```
+
+JSON output:
+
+```bash
+cargo run -- streams list --json
+```
+
 ### Service mode (recommended for background use)
 
 `service run` keeps a daemon process running and lets you control it from other terminals.

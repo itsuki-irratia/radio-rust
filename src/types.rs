@@ -53,6 +53,19 @@ pub struct CronDb {
     pub entries: Vec<CronEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEntry {
+    pub id: u64,
+    pub slug: String,
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct StreamDb {
+    pub entries: Vec<StreamEntry>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LiveOverrides {
     pub volume: Option<f64>,

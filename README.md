@@ -7,7 +7,7 @@ service with CLI controls for play, stop, mute, volume, and skip.
 ## Features
 
 - Schedule local audio files, XSPF playlists, and HTTP/HTTPS streams.
-- Store schedules and cron rules in `radio-fm-schedule.sqlite`.
+- Store schedules, cron rules, and named streams in `radio-fm-schedule.sqlite`.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
@@ -70,6 +70,14 @@ List scheduled items:
 
 ```bash
 cargo run -- schedule list
+```
+
+## Streams
+
+List named streams stored in the SQLite database:
+
+```bash
+cargo run -- streams list
 ```
 
 ## Cron Playback

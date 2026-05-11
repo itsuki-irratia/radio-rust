@@ -4,23 +4,26 @@ mod gui;
 mod playback;
 mod schedule;
 mod service;
+mod streams;
 mod types;
 
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::{Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands};
+use crate::cli::{Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands, StreamsCommands};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
 use crate::service::{run_service, send_service_command};
+use crate::streams::run_streams_list;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Scan { folder, json } => run_scan(&folder, json),
         Commands::Schedule { command } => run_schedule_command(command),
+        Commands::Streams { command } => run_streams_command(command),
         Commands::Cron { command } => run_cron_command(command),
         Commands::Service { command } => run_service_command(command),
         Commands::Gui => {
@@ -49,6 +52,12 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
             to,
         } => run_schedule_list(&db, json, day.as_deref(), from.as_deref(), to.as_deref()),
         ScheduleCommands::Run { db } => run_schedule_run(&db),
+    }
+}
+
+fn run_streams_command(command: StreamsCommands) -> Result<()> {
+    match command {
+        StreamsCommands::List { db, json } => run_streams_list(&db, json),
     }
 }
 

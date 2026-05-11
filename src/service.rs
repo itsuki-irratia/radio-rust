@@ -67,14 +67,28 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
         state.now_playing = Some(entry.file.clone());
         state.now_playing_id = Some(entry.id);
 
-        let outcome = play_entry_with_service_control(
+        let outcome = match play_entry_with_service_control(
             &entry,
             &listener,
             &mut overrides,
             &mut state,
             db_path,
             db.entries.len(),
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                eprintln!(
+                    "Failed to play #{} {}: {error:#}. Removing failed schedule entry and continuing.",
+                    entry.id, entry.file
+                );
+                remove_schedule_entry(db_path, entry.id).with_context(|| {
+                    format!("Failed to remove failed schedule entry #{}", entry.id)
+                })?;
+                state.now_playing = None;
+                state.now_playing_id = None;
+                continue;
+            }
+        };
 
         match outcome {
             ServiceDirective::Continue
