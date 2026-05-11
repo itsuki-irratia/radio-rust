@@ -22,8 +22,8 @@ use crate::schedule::{
 use crate::service::{run_service, send_service_command};
 use crate::streams::run_streams_list;
 use crate::time_signal::{
-    run_time_signal_disable, run_time_signal_enable, run_time_signal_set_audio,
-    run_time_signal_status,
+    run_time_signal_disable, run_time_signal_disable_during_streams, run_time_signal_enable,
+    run_time_signal_enable_during_streams, run_time_signal_set_audio, run_time_signal_status,
 };
 
 fn main() -> Result<()> {
@@ -75,6 +75,12 @@ fn run_time_signal_command(command: TimeSignalCommands) -> Result<()> {
         TimeSignalCommands::SetAudio { source, db } => run_time_signal_set_audio(&db, &source),
         TimeSignalCommands::Enable { db } => run_time_signal_enable(&db),
         TimeSignalCommands::Disable { db } => run_time_signal_disable(&db),
+        TimeSignalCommands::DisableDuringStreams { db } => {
+            run_time_signal_disable_during_streams(&db)
+        }
+        TimeSignalCommands::EnableDuringStreams { db } => {
+            run_time_signal_enable_during_streams(&db)
+        }
         TimeSignalCommands::Status { db, json } => run_time_signal_status(&db, json),
     }
 }

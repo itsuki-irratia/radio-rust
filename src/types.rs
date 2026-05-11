@@ -70,6 +70,8 @@ pub struct StreamDb {
 pub struct TimeSignalConfig {
     pub enabled: bool,
     pub source: Option<String>,
+    #[serde(default)]
+    pub skip_during_streams: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

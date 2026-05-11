@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use crate::cron::sync_cron_schedule;
 use crate::playback::{
     PlaybackStart, apply_live_audio_state, build_playbin_from_source, expand_playback_sources,
-    resolve_effective_audio, start_playbin_at_offset, validate_playback_source,
+    is_remote_media_source, resolve_effective_audio, start_playbin_at_offset,
+    validate_playback_source,
 };
 use crate::schedule::{
     load_schedule, remove_schedule_entry, sort_schedule_entries, validate_volume,
@@ -61,16 +62,16 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
         }
 
         let now = chrono::Local::now();
+        let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
         if state.audio_enabled {
             maybe_start_time_signal_overlay(
                 db_path,
+                next_due.as_ref().map(|entry| entry.file.as_str()),
                 &mut last_time_signal_tick,
                 &mut time_signal_overlays,
             );
         }
         poll_time_signal_overlays(&mut time_signal_overlays);
-
-        let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
 
         let Some(entry) = next_due.filter(|_| state.audio_enabled) else {
             state.now_playing = None;
@@ -474,7 +475,12 @@ fn play_source_with_service_control(
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
-        maybe_start_time_signal_overlay(db_path, last_time_signal_tick, time_signal_overlays);
+        maybe_start_time_signal_overlay(
+            db_path,
+            Some(source),
+            last_time_signal_tick,
+            time_signal_overlays,
+        );
         poll_time_signal_overlays(time_signal_overlays);
 
         let directive = process_pending_service_commands(listener, overrides, state, queued_items)?;
@@ -635,6 +641,7 @@ struct TimeSignalOverlay {
 
 fn maybe_start_time_signal_overlay(
     db_path: &Path,
+    current_source: Option<&str>,
     last_tick: &mut Option<i64>,
     overlays: &mut Vec<TimeSignalOverlay>,
 ) {
@@ -651,6 +658,15 @@ fn maybe_start_time_signal_overlay(
     };
 
     *last_tick = Some(tick);
+    if config.skip_during_streams && current_source.is_some_and(is_remote_media_source) {
+        if let Some(source) = current_source {
+            println!(
+                "Skipping Greenwich time signal for tick {tick} because stream is playing: {source}"
+            );
+        }
+        return;
+    }
+
     let Some(source) = config.source else {
         return;
     };

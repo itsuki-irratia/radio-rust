@@ -96,6 +96,13 @@ cargo run -- time-signal enable
 cargo run -- time-signal disable
 ```
 
+Disable or re-enable the signal while a remote stream is playing:
+
+```bash
+cargo run -- time-signal disable-during-streams
+cargo run -- time-signal enable-during-streams
+```
+
 Check the current setting:
 
 ```bash

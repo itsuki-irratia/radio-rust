@@ -66,6 +66,14 @@ pub enum TimeSignalCommands {
         #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
     },
+    DisableDuringStreams {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
+    EnableDuringStreams {
+        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
+        db: PathBuf,
+    },
     Status {
         #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
         db: PathBuf,
