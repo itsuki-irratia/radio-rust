@@ -21,7 +21,32 @@ service with CLI controls for play, stop, mute, volume, and skip.
 - GStreamer runtime and plugins.
 - GTK 4 development/runtime libraries if you use the GUI.
 
-On Manjaro/Arch-style systems, install the packages listed in `requirements-manjaro.txt`.
+Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install --yes \
+  build-essential git curl pkg-config clang cmake meson ninja-build \
+  libgtk-4-dev libadwaita-1-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+  gstreamer1.0-pipewire \
+  pipewire pipewire-pulse libasound2-dev \
+  sqlite3 libsqlite3-dev libssl-dev jq
+```
+
+Manjaro/Arch:
+
+```bash
+sudo pacman -S --needed \
+  base-devel git rustup pkgconf clang cmake meson ninja \
+  gtk4 libadwaita \
+  gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
+  gst-plugins-ugly gst-libav gst-plugin-pipewire gst-plugin-gtk4 \
+  pipewire pipewire-pulse alsa-lib \
+  sqlite openssl curl jq
+```
 
 ## Build
 
