@@ -138,6 +138,41 @@ impl Default for PlaybackConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IcecastConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub server: Option<String>,
+    pub device: Option<String>,
+    #[serde(default = "default_icecast_mount")]
+    pub mount: String,
+    #[serde(default = "default_icecast_username")]
+    pub username: String,
+    pub password: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub public: bool,
+}
+
+impl Default for IcecastConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: None,
+            device: None,
+            mount: default_icecast_mount(),
+            username: default_icecast_username(),
+            password: None,
+            name: None,
+            description: None,
+            genre: None,
+            public: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub playback: PlaybackConfig,
@@ -145,6 +180,8 @@ pub struct AppConfig {
     pub streams: StreamDb,
     #[serde(default)]
     pub time_signal: TimeSignalConfig,
+    #[serde(default)]
+    pub icecast: IcecastConfig,
 }
 
 impl Default for AppConfig {
@@ -153,6 +190,7 @@ impl Default for AppConfig {
             playback: PlaybackConfig::default(),
             streams: StreamDb::default(),
             time_signal: TimeSignalConfig::default(),
+            icecast: IcecastConfig::default(),
         }
     }
 }
@@ -199,6 +237,14 @@ pub fn default_fade_in_secs() -> u64 {
 
 pub fn default_fade_out_secs() -> u64 {
     DEFAULT_FADE_OUT_SECS
+}
+
+pub fn default_icecast_mount() -> String {
+    "/radio.ogg".to_string()
+}
+
+pub fn default_icecast_username() -> String {
+    "source".to_string()
 }
 
 pub fn default_enabled() -> bool {

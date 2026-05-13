@@ -13,6 +13,7 @@ service with CLI controls for play, stop, mute, volume, and skip.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
 - Play a configurable Greenwich time signal at second 00 of each minute.
+- Capture the radio output device and publish it to an Icecast server.
 - Control a running service through a Unix socket.
 
 ## Requirements
@@ -136,6 +137,39 @@ Check the current setting:
 ```bash
 cargo run -- time-signal status
 ```
+
+## Icecast
+
+Configure an Icecast server in `radio-rust.json`:
+
+```bash
+cargo run -- icecast configure \
+  --server http://example.org:8000 \
+  --mount /radio.ogg \
+  --username source \
+  --password hackme \
+  --name "Radio FM" \
+  --genre "Radio"
+```
+
+Check the stored settings or test basic TCP connectivity:
+
+```bash
+cargo run -- icecast status
+cargo run -- icecast test
+```
+
+Pick the monitor source for the output device used by the radio, then start
+publishing that output to the configured mount:
+
+```bash
+cargo run -- icecast devices
+cargo run -- icecast set-device alsa_output.name.monitor
+cargo run -- icecast start
+```
+
+When `radio-fm service run` starts and Icecast is enabled with a device set, the
+service starts this device-to-Icecast pipeline automatically.
 
 ## Cron Playback
 

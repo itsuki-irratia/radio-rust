@@ -34,6 +34,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: CronCommands,
     },
+    Icecast {
+        #[command(subcommand)]
+        command: IcecastCommands,
+    },
     Service {
         #[command(subcommand)]
         command: ServiceCommands,
@@ -116,6 +120,67 @@ pub enum CronCommands {
         id: u64,
         #[arg(long)]
         db: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IcecastCommands {
+    Configure {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        mount: String,
+        #[arg(long, default_value = "source")]
+        username: String,
+        #[arg(long)]
+        password: String,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        genre: Option<String>,
+        #[arg(long, default_value_t = false)]
+        public: bool,
+        #[arg(long, default_value = "true")]
+        enabled: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Enable {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Disable {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Status {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Test {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Devices,
+    SetDevice {
+        device: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Start {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Stream {
+        source: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 

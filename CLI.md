@@ -215,6 +215,60 @@ cargo run -- time-signal status --json
 
 The aliases `greenwich` and `greenwitch` also work for the top-level command.
 
+### Icecast
+
+Icecast connection settings are stored in `radio-rust.json` under the `icecast`
+key. The intended production path is to capture the monitor source of the output
+device used by the radio and publish that audio to Icecast.
+
+Configure Icecast:
+
+```bash
+cargo run -- icecast configure \
+  --server http://example.org:8000 \
+  --mount /radio.ogg \
+  --username source \
+  --password hackme \
+  --device alsa_output.name.monitor \
+  --name "Radio FM" \
+  --description "Scheduled radio output" \
+  --genre "Radio" \
+  --public
+```
+
+Show status:
+
+```bash
+cargo run -- icecast status
+cargo run -- icecast status --json
+```
+
+Enable, disable, or test connectivity:
+
+```bash
+cargo run -- icecast enable
+cargo run -- icecast disable
+cargo run -- icecast test
+```
+
+List available monitor sources and set the device to capture:
+
+```bash
+cargo run -- icecast devices
+cargo run -- icecast set-device alsa_output.name.monitor
+```
+
+Start publishing the selected output device to the configured Icecast mount. The
+command runs until stopped.
+
+```bash
+cargo run -- icecast start
+```
+
+When `service run` starts and Icecast is enabled with a device set, the service
+starts the same device capture automatically. The `icecast stream <source>`
+command is also available for testing a single file or remote URL directly.
+
 ### Service mode (recommended for background use)
 
 `service run` keeps a daemon process running and lets you control it from other terminals.

@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod cron;
 mod gui;
+mod icecast;
 mod playback;
 mod schedule;
 mod service;
@@ -13,11 +14,16 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::cli::{
-    Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands, StreamsCommands,
-    TimeSignalCommands,
+    Cli, Commands, CronCommands, IcecastCommands, ScheduleCommands, ServiceCommands,
+    StreamsCommands, TimeSignalCommands,
 };
 use crate::config::{load_app_config, resolve_config_path, resolve_db_path};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
+use crate::icecast::{
+    IcecastConfigure, run_icecast_configure, run_icecast_devices, run_icecast_disable,
+    run_icecast_enable, run_icecast_set_device, run_icecast_start, run_icecast_status,
+    run_icecast_stream, run_icecast_test,
+};
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
@@ -37,6 +43,7 @@ fn main() -> Result<()> {
         Commands::Streams { command } => run_streams_command(command),
         Commands::TimeSignal { command } => run_time_signal_command(command),
         Commands::Cron { command } => run_cron_command(command),
+        Commands::Icecast { command } => run_icecast_command(command),
         Commands::Service { command } => run_service_command(command),
         Commands::Gui => {
             gui::run_gui();
@@ -157,6 +164,55 @@ fn run_cron_command(command: CronCommands) -> Result<()> {
         }
         CronCommands::List { db, json } => run_cron_list(&resolve_db_path(db)?, json),
         CronCommands::Remove { id, db } => run_cron_remove(&resolve_db_path(db)?, id),
+    }
+}
+
+fn run_icecast_command(command: IcecastCommands) -> Result<()> {
+    match command {
+        IcecastCommands::Configure {
+            server,
+            mount,
+            username,
+            password,
+            device,
+            name,
+            description,
+            genre,
+            public,
+            enabled,
+            config,
+        } => {
+            let enabled = parse_bool_arg(&enabled)?;
+            run_icecast_configure(
+                &resolve_config_path(config)?,
+                IcecastConfigure {
+                    server,
+                    mount,
+                    username,
+                    password,
+                    device,
+                    name,
+                    description,
+                    genre,
+                    public,
+                    enabled,
+                },
+            )
+        }
+        IcecastCommands::Enable { config } => run_icecast_enable(&resolve_config_path(config)?),
+        IcecastCommands::Disable { config } => run_icecast_disable(&resolve_config_path(config)?),
+        IcecastCommands::Status { config, json } => {
+            run_icecast_status(&resolve_config_path(config)?, json)
+        }
+        IcecastCommands::Test { config } => run_icecast_test(&resolve_config_path(config)?),
+        IcecastCommands::Devices => run_icecast_devices(),
+        IcecastCommands::SetDevice { device, config } => {
+            run_icecast_set_device(&resolve_config_path(config)?, &device)
+        }
+        IcecastCommands::Start { config } => run_icecast_start(&resolve_config_path(config)?),
+        IcecastCommands::Stream { source, config } => {
+            run_icecast_stream(&resolve_config_path(config)?, &source)
+        }
     }
 }
 

@@ -43,12 +43,17 @@ pub fn resolve_db_path(db_path: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
+    let mut needs_save = !config_path.exists();
     let mut config = if config_path.exists() {
         let raw = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file {}", config_path.display()))?;
         if raw.trim().is_empty() {
+            needs_save = true;
             AppConfig::default()
         } else {
+            if !raw.contains("\"icecast\"") {
+                needs_save = true;
+            }
             serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse config file {}", config_path.display()))?
         }
@@ -56,7 +61,7 @@ pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
         AppConfig::default()
     };
 
-    if ensure_builtin_streams(&mut config) || !config_path.exists() {
+    if ensure_builtin_streams(&mut config) || needs_save {
         save_app_config(config_path, &config)?;
     }
 

@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cron::sync_cron_schedule;
+use crate::icecast::{poll_icecast_stream, start_icecast_device_stream, stop_icecast_stream};
 use crate::playback::{
     PlaybackStart, apply_live_audio_state, build_playbin_from_source, expand_playback_sources,
     is_remote_media_source, resolve_effective_audio, start_playbin_at_offset,
@@ -29,6 +30,13 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
     let mut state = ServiceState::new();
     let mut last_time_signal_tick: Option<i64> = None;
     let mut time_signal_overlays = Vec::new();
+    let mut icecast_stream = match start_icecast_device_stream(config_path) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("Failed to start Icecast device stream: {error:#}");
+            None
+        }
+    };
 
     println!(
         "Service running. socket={} schedule_db={} config={}",
@@ -38,6 +46,7 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
     );
 
     loop {
+        poll_icecast_stream(&mut icecast_stream);
         sync_cron_schedule(db_path)?;
         let mut db = load_schedule(db_path)?;
         sort_schedule_entries(&mut db.entries);
@@ -58,6 +67,7 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
             ServiceDirective::StopService => {
                 println!("Service shutdown requested.");
                 stop_time_signal_overlays(&mut time_signal_overlays);
+                stop_icecast_stream(&mut icecast_stream);
                 break;
             }
         }
@@ -94,6 +104,7 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
             db.entries.len(),
             &mut last_time_signal_tick,
             &mut time_signal_overlays,
+            &mut icecast_stream,
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -124,6 +135,7 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
             ServiceDirective::StopService => {
                 println!("Service shutdown requested during playback.");
                 stop_time_signal_overlays(&mut time_signal_overlays);
+                stop_icecast_stream(&mut icecast_stream);
                 break;
             }
             ServiceDirective::StopAudio => {
@@ -393,6 +405,7 @@ fn play_entry_with_service_control(
     queued_items: usize,
     last_time_signal_tick: &mut Option<i64>,
     time_signal_overlays: &mut Vec<TimeSignalOverlay>,
+    icecast_stream: &mut Option<crate::icecast::IcecastStream>,
 ) -> Result<ServiceDirective> {
     validate_volume(entry.volume)?;
     let start_offset = scheduled_start_offset(entry);
@@ -422,6 +435,7 @@ fn play_entry_with_service_control(
             queued_items,
             last_time_signal_tick,
             time_signal_overlays,
+            icecast_stream,
         )?;
 
         if outcome != ServiceDirective::Continue {
@@ -446,6 +460,7 @@ fn play_source_with_service_control(
     queued_items: usize,
     last_time_signal_tick: &mut Option<i64>,
     time_signal_overlays: &mut Vec<TimeSignalOverlay>,
+    icecast_stream: &mut Option<crate::icecast::IcecastStream>,
 ) -> Result<ServiceDirective> {
     validate_playback_source(source)?;
 
@@ -480,6 +495,7 @@ fn play_source_with_service_control(
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
+        poll_icecast_stream(icecast_stream);
         maybe_start_time_signal_overlay(
             config_path,
             Some(source),
