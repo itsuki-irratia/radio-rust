@@ -22,7 +22,7 @@ use crate::types::{
     FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
 };
 
-pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
+pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Result<()> {
     gst::init().context("Failed to initialize GStreamer")?;
     let listener = bind_service_socket(socket_path)?;
     let mut overrides = LiveOverrides::default();
@@ -31,9 +31,10 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
     let mut time_signal_overlays = Vec::new();
 
     println!(
-        "Service running. socket={} schedule_db={}",
+        "Service running. socket={} schedule_db={} config={}",
         socket_path.display(),
-        db_path.display()
+        db_path.display(),
+        config_path.display()
     );
 
     loop {
@@ -65,7 +66,7 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
         let next_due = db.entries.first().cloned().filter(|entry| entry.at <= now);
         if state.audio_enabled {
             maybe_start_time_signal_overlay(
-                db_path,
+                config_path,
                 next_due.as_ref().map(|entry| entry.file.as_str()),
                 &mut last_time_signal_tick,
                 &mut time_signal_overlays,
@@ -89,6 +90,7 @@ pub fn run_service(db_path: &Path, socket_path: &Path) -> Result<()> {
             &mut overrides,
             &mut state,
             db_path,
+            config_path,
             db.entries.len(),
             &mut last_time_signal_tick,
             &mut time_signal_overlays,
@@ -387,6 +389,7 @@ fn play_entry_with_service_control(
     overrides: &mut LiveOverrides,
     state: &mut ServiceState,
     db_path: &Path,
+    config_path: &Path,
     queued_items: usize,
     last_time_signal_tick: &mut Option<i64>,
     time_signal_overlays: &mut Vec<TimeSignalOverlay>,
@@ -415,6 +418,7 @@ fn play_entry_with_service_control(
             overrides,
             state,
             db_path,
+            config_path,
             queued_items,
             last_time_signal_tick,
             time_signal_overlays,
@@ -438,6 +442,7 @@ fn play_source_with_service_control(
     overrides: &mut LiveOverrides,
     state: &mut ServiceState,
     db_path: &Path,
+    config_path: &Path,
     queued_items: usize,
     last_time_signal_tick: &mut Option<i64>,
     time_signal_overlays: &mut Vec<TimeSignalOverlay>,
@@ -476,7 +481,7 @@ fn play_source_with_service_control(
 
     loop {
         maybe_start_time_signal_overlay(
-            db_path,
+            config_path,
             Some(source),
             last_time_signal_tick,
             time_signal_overlays,
@@ -640,13 +645,13 @@ struct TimeSignalOverlay {
 }
 
 fn maybe_start_time_signal_overlay(
-    db_path: &Path,
+    config_path: &Path,
     current_source: Option<&str>,
     last_tick: &mut Option<i64>,
     overlays: &mut Vec<TimeSignalOverlay>,
 ) {
     let now = chrono::Local::now();
-    let config = match load_time_signal_config(db_path) {
+    let config = match load_time_signal_config(config_path) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("Failed to load Greenwich time signal config: {error:#}");
@@ -658,7 +663,7 @@ fn maybe_start_time_signal_overlay(
     };
 
     *last_tick = Some(tick);
-    if config.skip_during_streams && current_source.is_some_and(is_remote_media_source) {
+    if !config.streams && current_source.is_some_and(is_remote_media_source) {
         if let Some(source) = current_source {
             println!(
                 "Skipping Greenwich time signal for tick {tick} because stream is playing: {source}"

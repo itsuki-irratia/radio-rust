@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod cron;
 mod gui;
 mod playback;
@@ -8,13 +9,14 @@ mod streams;
 mod time_signal;
 mod types;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::cli::{
     Cli, Commands, CronCommands, ScheduleCommands, ServiceCommands, StreamsCommands,
     TimeSignalCommands,
 };
+use crate::config::{load_app_config, resolve_config_path, resolve_db_path};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
@@ -23,7 +25,8 @@ use crate::service::{run_service, send_service_command};
 use crate::streams::run_streams_list;
 use crate::time_signal::{
     run_time_signal_disable, run_time_signal_disable_during_streams, run_time_signal_enable,
-    run_time_signal_enable_during_streams, run_time_signal_set_audio, run_time_signal_status,
+    run_time_signal_enable_during_streams, run_time_signal_set_audio, run_time_signal_set_streams,
+    run_time_signal_status,
 };
 
 fn main() -> Result<()> {
@@ -52,36 +55,79 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
             volume,
             mute,
             db,
-        } => run_schedule_add(&db, &file, &at, fade_in, fade_out, volume, mute),
+            config,
+        } => {
+            let db = resolve_db_path(db)?;
+            let config = load_app_config(&resolve_config_path(config)?)?;
+            run_schedule_add(
+                &db,
+                &file,
+                &at,
+                fade_in.unwrap_or(config.playback.default_fade_in_secs),
+                fade_out.unwrap_or(config.playback.default_fade_out_secs),
+                volume.unwrap_or(config.playback.default_volume),
+                mute || config.playback.default_mute,
+            )
+        }
         ScheduleCommands::List {
             db,
             json,
             day,
             from,
             to,
-        } => run_schedule_list(&db, json, day.as_deref(), from.as_deref(), to.as_deref()),
-        ScheduleCommands::Run { db } => run_schedule_run(&db),
+        } => run_schedule_list(
+            &resolve_db_path(db)?,
+            json,
+            day.as_deref(),
+            from.as_deref(),
+            to.as_deref(),
+        ),
+        ScheduleCommands::Run { db } => run_schedule_run(&resolve_db_path(db)?),
     }
 }
 
 fn run_streams_command(command: StreamsCommands) -> Result<()> {
     match command {
-        StreamsCommands::List { db, json } => run_streams_list(&db, json),
+        StreamsCommands::List { config, json } => {
+            run_streams_list(&resolve_config_path(config)?, json)
+        }
     }
 }
 
 fn run_time_signal_command(command: TimeSignalCommands) -> Result<()> {
     match command {
-        TimeSignalCommands::SetAudio { source, db } => run_time_signal_set_audio(&db, &source),
-        TimeSignalCommands::Enable { db } => run_time_signal_enable(&db),
-        TimeSignalCommands::Disable { db } => run_time_signal_disable(&db),
-        TimeSignalCommands::DisableDuringStreams { db } => {
-            run_time_signal_disable_during_streams(&db)
+        TimeSignalCommands::SetAudio { source, config } => {
+            run_time_signal_set_audio(&resolve_config_path(config)?, &source)
         }
-        TimeSignalCommands::EnableDuringStreams { db } => {
-            run_time_signal_enable_during_streams(&db)
+        TimeSignalCommands::Enable { config } => {
+            run_time_signal_enable(&resolve_config_path(config)?)
         }
-        TimeSignalCommands::Status { db, json } => run_time_signal_status(&db, json),
+        TimeSignalCommands::Disable { config } => {
+            run_time_signal_disable(&resolve_config_path(config)?)
+        }
+        TimeSignalCommands::DisableDuringStreams { config } => {
+            run_time_signal_disable_during_streams(&resolve_config_path(config)?)
+        }
+        TimeSignalCommands::EnableDuringStreams { config } => {
+            run_time_signal_enable_during_streams(&resolve_config_path(config)?)
+        }
+        TimeSignalCommands::Streams { enabled, config } => {
+            let enabled = parse_bool_arg(&enabled)?;
+            run_time_signal_set_streams(&resolve_config_path(config)?, enabled)?;
+            println!("Greenwich time signal streams set to {enabled}");
+            Ok(())
+        }
+        TimeSignalCommands::Status { config, json } => {
+            run_time_signal_status(&resolve_config_path(config)?, json)
+        }
+    }
+}
+
+fn parse_bool_arg(value: &str) -> Result<bool> {
+    match value {
+        "true" | "on" | "yes" | "1" => Ok(true),
+        "false" | "off" | "no" | "0" => Ok(false),
+        _ => bail!("Use true or false"),
     }
 }
 
@@ -95,15 +141,32 @@ fn run_cron_command(command: CronCommands) -> Result<()> {
             volume,
             mute,
             db,
-        } => run_cron_add(&db, &file, &expr, fade_in, fade_out, volume, mute),
-        CronCommands::List { db, json } => run_cron_list(&db, json),
-        CronCommands::Remove { id, db } => run_cron_remove(&db, id),
+            config,
+        } => {
+            let db = resolve_db_path(db)?;
+            let config = load_app_config(&resolve_config_path(config)?)?;
+            run_cron_add(
+                &db,
+                &file,
+                &expr,
+                fade_in.unwrap_or(config.playback.default_fade_in_secs),
+                fade_out.unwrap_or(config.playback.default_fade_out_secs),
+                volume.unwrap_or(config.playback.default_volume),
+                mute || config.playback.default_mute,
+            )
+        }
+        CronCommands::List { db, json } => run_cron_list(&resolve_db_path(db)?, json),
+        CronCommands::Remove { id, db } => run_cron_remove(&resolve_db_path(db)?, id),
     }
 }
 
 fn run_service_command(command: ServiceCommands) -> Result<()> {
     match command {
-        ServiceCommands::Run { db, socket } => run_service(&db, &socket),
+        ServiceCommands::Run { db, config, socket } => run_service(
+            &resolve_db_path(db)?,
+            &resolve_config_path(config)?,
+            &socket,
+        ),
         ServiceCommands::Play { socket } => {
             let response = send_service_command(&socket, "play")?;
             print!("{response}");

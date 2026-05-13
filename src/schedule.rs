@@ -11,7 +11,9 @@ use std::time::Duration;
 use crate::playback::{
     canonical_playback_source, expand_playback_sources, is_xspf_source, play_file_with_fades_from,
 };
-use crate::types::{SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry};
+use crate::types::{
+    DEFAULT_CONFIG_FILE_NAME, SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry,
+};
 
 pub fn run_scan(folder: &Path, json: bool) -> Result<()> {
     if !folder.exists() {
@@ -286,6 +288,12 @@ fn add_schedule_column_if_missing(conn: &Connection, name: &str, data_type: &str
 
 fn import_legacy_json_schedule(db_path: &Path, conn: &Connection) -> Result<()> {
     let legacy_path = db_path.with_extension("json");
+    if legacy_path
+        .file_name()
+        .is_some_and(|name| name == DEFAULT_CONFIG_FILE_NAME)
+    {
+        return Ok(());
+    }
     if !legacy_path.exists() {
         return Ok(());
     }

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::types::{DEFAULT_SCHEDULE_DB, DEFAULT_SERVICE_SOCKET, DEFAULT_VOLUME};
+use crate::types::DEFAULT_SERVICE_SOCKET;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Radio FM starter CLI + GUI")]
@@ -44,8 +44,8 @@ pub enum Commands {
 #[derive(Subcommand, Debug)]
 pub enum StreamsCommands {
     List {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -55,28 +55,33 @@ pub enum StreamsCommands {
 pub enum TimeSignalCommands {
     SetAudio {
         source: String,
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     Enable {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     Disable {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     DisableDuringStreams {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     EnableDuringStreams {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Streams {
+        enabled: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     Status {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -88,27 +93,29 @@ pub enum CronCommands {
         file: PathBuf,
         #[arg(long)]
         expr: String,
-        #[arg(long, default_value_t = 5)]
-        fade_in: u64,
-        #[arg(long, default_value_t = 5)]
-        fade_out: u64,
-        #[arg(long, default_value_t = DEFAULT_VOLUME)]
-        volume: f64,
+        #[arg(long)]
+        fade_in: Option<u64>,
+        #[arg(long)]
+        fade_out: Option<u64>,
+        #[arg(long)]
+        volume: Option<f64>,
         #[arg(long, default_value_t = false)]
         mute: bool,
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     List {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
     Remove {
         id: u64,
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 }
 
@@ -118,20 +125,22 @@ pub enum ScheduleCommands {
         file: PathBuf,
         #[arg(long)]
         at: String,
-        #[arg(long, default_value_t = 5)]
-        fade_in: u64,
-        #[arg(long, default_value_t = 5)]
-        fade_out: u64,
-        #[arg(long, default_value_t = DEFAULT_VOLUME)]
-        volume: f64,
+        #[arg(long)]
+        fade_in: Option<u64>,
+        #[arg(long)]
+        fade_out: Option<u64>,
+        #[arg(long)]
+        volume: Option<f64>,
         #[arg(long, default_value_t = false)]
         mute: bool,
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     List {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -142,16 +151,18 @@ pub enum ScheduleCommands {
         to: Option<String>,
     },
     Run {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ServiceCommands {
     Run {
-        #[arg(long, default_value = DEFAULT_SCHEDULE_DB)]
-        db: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
     },

@@ -47,12 +47,19 @@ cargo run -- scan /path/to/music --json
 The default schedule database is:
 
 ```text
-radio-fm-schedule.sqlite
+$HOME/.config/radio-rust/schedule.sqlite
 ```
 
 You can override it with `--db /path/to/schedule.sqlite`.
-If the default database does not exist yet and a legacy `radio-fm-schedule.json`
-file is present beside it, the entries are imported once into SQLite.
+App configuration is stored separately in:
+
+```text
+$HOME/.config/radio-rust/radio-rust.json
+```
+
+You can override it for config-aware commands with `--config /path/to/radio-rust.json`.
+If a schedule database does not exist yet and a legacy JSON schedule file is present
+beside it, the entries are imported once into SQLite.
 
 #### Add scheduled song
 
@@ -146,13 +153,13 @@ Remove a cron schedule:
 cargo run -- cron remove 1
 ```
 
-Cron items are stored in the same SQLite database. The service materializes the
+Cron schedules are stored in the same SQLite database. The service materializes the
 next matching cron occurrence into the normal one-shot schedule queue, so
 scheduled replacement/fade behavior stays the same.
 
 ### Streams
 
-Named streams are stored in the same SQLite database as schedules and cron rules.
+Named streams are stored in `radio-rust.json`, not in the schedule database.
 
 List streams:
 
@@ -169,8 +176,7 @@ cargo run -- streams list --json
 ### Greenwich time signal
 
 The service can play a configured audio source at second 00 of each minute. The
-source is stored in the same SQLite database as schedules, cron rules, and
-streams.
+source and stream playback behavior are stored in `radio-rust.json`.
 
 Set the signal audio:
 
@@ -190,6 +196,14 @@ Disable or re-enable the signal while a remote stream is playing:
 ```bash
 cargo run -- time-signal disable-during-streams
 cargo run -- time-signal enable-during-streams
+```
+
+Set the same behavior directly. When `streams` is `true`, the time signal plays
+over remote streams; when `false`, it is skipped while a remote stream is playing.
+
+```bash
+cargo run -- time-signal streams true
+cargo run -- time-signal streams false
 ```
 
 Show the current setting:
@@ -220,7 +234,7 @@ cargo run -- service run
 Start service with custom schedule database and socket:
 
 ```bash
-cargo run -- service run --db /path/to/radio-fm-schedule.sqlite --socket /tmp/radio-fm-custom.sock
+cargo run -- service run --db /path/to/schedule.sqlite --config /path/to/radio-rust.json --socket /tmp/radio-fm-custom.sock
 ```
 
 Service status:
@@ -304,7 +318,7 @@ After=default.target
 [Service]
 Type=simple
 WorkingDirectory=/home/zital/projects/radio-fm
-ExecStart=/home/zital/projects/radio-fm/target/release/radio-fm service run --db /home/zital/projects/radio-fm/radio-fm-schedule.sqlite --socket /tmp/radio-fm.sock
+ExecStart=/home/zital/projects/radio-fm/target/release/radio-fm service run --socket /tmp/radio-fm.sock
 Restart=always
 RestartSec=2
 

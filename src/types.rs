@@ -3,11 +3,15 @@ use serde::{Deserialize, Serialize};
 
 pub const SUPPORTED_EXTENSIONS: &[&str] =
     &["mp3", "aac", "flac", "ogg", "opus", "wav", "m4a", "xspf"];
-pub const DEFAULT_SCHEDULE_DB: &str = "radio-fm-schedule.sqlite";
+pub const DEFAULT_CONFIG_DIR_NAME: &str = "radio-rust";
+pub const DEFAULT_CONFIG_FILE_NAME: &str = "radio-rust.json";
+pub const DEFAULT_SCHEDULE_DB_FILE_NAME: &str = "schedule.sqlite";
 pub const FADE_TICK_MS: u64 = 200;
 pub const DEFAULT_SERVICE_SOCKET: &str = "/tmp/radio-fm.sock";
 pub const SERVICE_TICK_MS: u64 = 250;
 pub const DEFAULT_VOLUME: f64 = 1.0;
+pub const DEFAULT_FADE_IN_SECS: u64 = 5;
+pub const DEFAULT_FADE_OUT_SECS: u64 = 5;
 
 #[derive(Serialize)]
 pub struct ScanResult {
@@ -61,17 +65,96 @@ pub struct StreamEntry {
     pub url: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StreamDb {
     pub entries: Vec<StreamEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimeSignalConfig {
     pub enabled: bool,
     pub source: Option<String>,
+    pub streams: bool,
+}
+
+impl<'de> Deserialize<'de> for TimeSignalConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TimeSignalConfigInput {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            source: Option<String>,
+            streams: Option<bool>,
+            #[serde(default)]
+            skip_during_streams: Option<bool>,
+        }
+
+        let input = TimeSignalConfigInput::deserialize(deserializer)?;
+        Ok(Self {
+            enabled: input.enabled,
+            source: input.source,
+            streams: input
+                .streams
+                .unwrap_or_else(|| input.skip_during_streams.map(|skip| !skip).unwrap_or(true)),
+        })
+    }
+}
+
+impl Default for TimeSignalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source: None,
+            streams: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackConfig {
+    #[serde(default = "default_fade_in_secs")]
+    pub default_fade_in_secs: u64,
+    #[serde(default = "default_fade_out_secs")]
+    pub default_fade_out_secs: u64,
+    #[serde(default = "default_volume")]
+    pub default_volume: f64,
     #[serde(default)]
-    pub skip_during_streams: bool,
+    pub default_mute: bool,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self {
+            default_fade_in_secs: DEFAULT_FADE_IN_SECS,
+            default_fade_out_secs: DEFAULT_FADE_OUT_SECS,
+            default_volume: DEFAULT_VOLUME,
+            default_mute: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub playback: PlaybackConfig,
+    #[serde(default)]
+    pub streams: StreamDb,
+    #[serde(default)]
+    pub time_signal: TimeSignalConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            playback: PlaybackConfig::default(),
+            streams: StreamDb::default(),
+            time_signal: TimeSignalConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -108,6 +191,14 @@ pub enum ServiceDirective {
 
 pub fn default_volume() -> f64 {
     DEFAULT_VOLUME
+}
+
+pub fn default_fade_in_secs() -> u64 {
+    DEFAULT_FADE_IN_SECS
+}
+
+pub fn default_fade_out_secs() -> u64 {
+    DEFAULT_FADE_OUT_SECS
 }
 
 pub fn default_enabled() -> bool {

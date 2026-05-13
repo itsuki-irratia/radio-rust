@@ -7,7 +7,8 @@ service with CLI controls for play, stop, mute, volume, and skip.
 ## Features
 
 - Schedule local audio files, XSPF playlists, and HTTP/HTTPS streams.
-- Store schedules, cron rules, and named streams in `radio-fm-schedule.sqlite`.
+- Store schedules and cron rules in SQLite under `$HOME/.config/radio-rust`.
+- Store app configuration, named streams, and playback defaults in `radio-rust.json`.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
@@ -75,7 +76,7 @@ cargo run -- schedule list
 
 ## Streams
 
-List named streams stored in the SQLite database:
+List named streams stored in `radio-rust.json`:
 
 ```bash
 cargo run -- streams list
@@ -101,6 +102,8 @@ Disable or re-enable the signal while a remote stream is playing:
 ```bash
 cargo run -- time-signal disable-during-streams
 cargo run -- time-signal enable-during-streams
+cargo run -- time-signal streams true
+cargo run -- time-signal streams false
 ```
 
 Check the current setting:
@@ -162,8 +165,9 @@ cargo run -- service skip
 cargo run -- service shutdown
 ```
 
-The default database is `radio-fm-schedule.sqlite`, and the default control socket is
-`/tmp/radio-fm.sock`. Both can be changed with `--db` and `--socket`.
+By default, the app uses `$HOME/.config/radio-rust/schedule.sqlite` for schedules and
+`$HOME/.config/radio-rust/radio-rust.json` for configuration. The default control socket is
+`/tmp/radio-fm.sock`. These can be changed with `--db`, `--config`, and `--socket`.
 
 ## GUI
 
