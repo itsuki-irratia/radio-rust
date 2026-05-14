@@ -215,6 +215,34 @@ cargo run -- time-signal status --json
 
 The aliases `greenwich` and `greenwitch` also work for the top-level command.
 
+### Service controls
+
+Start the foreground scheduler service:
+
+```bash
+cargo run -- service run
+```
+
+Control the running service through its Unix socket:
+
+```bash
+cargo run -- service status
+cargo run -- service play
+cargo run -- service stop
+cargo run -- service set-volume 0.50
+cargo run -- service fade-out 5
+cargo run -- service fade-in 5
+cargo run -- service mute
+cargo run -- service unmute
+cargo run -- service skip
+cargo run -- service shutdown
+```
+
+`fade-out` ramps the active playback from its current audible volume to silence.
+`fade-in` ramps back from the current audible volume to the previous non-zero
+live volume, or to the current scheduled/default volume when there is no previous
+live fade target. Both commands default to 5 seconds when no duration is passed.
+
 ### Icecast
 
 Icecast connection settings are stored in `radio-rust.json` under the `icecast`

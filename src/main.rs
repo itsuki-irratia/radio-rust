@@ -239,6 +239,16 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
             print!("{response}");
             Ok(())
         }
+        ServiceCommands::FadeIn { seconds, socket } => {
+            let response = send_service_command(&socket, &format!("fade-in {seconds}"))?;
+            print!("{response}");
+            Ok(())
+        }
+        ServiceCommands::FadeOut { seconds, socket } => {
+            let response = send_service_command(&socket, &format!("fade-out {seconds}"))?;
+            print!("{response}");
+            Ok(())
+        }
         ServiceCommands::Mute { socket } => {
             let response = send_service_command(&socket, "mute on")?;
             print!("{response}");

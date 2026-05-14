@@ -20,7 +20,9 @@ use crate::schedule::{
 };
 use crate::time_signal::{due_time_signal_tick, load_time_signal_config};
 use crate::types::{
-    FADE_TICK_MS, LiveOverrides, SERVICE_TICK_MS, ScheduleEntry, ServiceDirective, ServiceState,
+    DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, FADE_TICK_MS, LiveOverrides, LiveVolumeFade,
+    LiveVolumeFadeDirection, LiveVolumeFadeRequest, SERVICE_TICK_MS, ScheduleEntry,
+    ServiceDirective, ServiceState,
 };
 
 pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Result<()> {
@@ -319,13 +321,24 @@ fn handle_service_command(
                 .mute
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "none".to_string());
+            let live_fade = overrides
+                .active_fade
+                .map(|fade| {
+                    format!(
+                        "{:.2}->{:.2}/{}s",
+                        fade.from_volume,
+                        fade.to_volume,
+                        fade.duration.as_secs()
+                    )
+                })
+                .unwrap_or_else(|| "none".to_string());
             let audio = if state.audio_enabled {
                 "enabled"
             } else {
                 "stopped"
             };
             let response = format!(
-                "ok: running audio={audio} now_playing_id={now_id} now_playing={now_playing} queued_items={queued_items} override_volume={override_volume} override_mute={override_mute}\n"
+                "ok: running audio={audio} now_playing_id={now_id} now_playing={now_playing} queued_items={queued_items} override_volume={override_volume} override_mute={override_mute} live_fade={live_fade}\n"
             );
             Ok((response, ServiceDirective::Continue))
         }
@@ -348,8 +361,43 @@ fn handle_service_command(
                 .with_context(|| format!("Invalid volume value: {value_text}"))?;
             validate_volume(value)?;
             overrides.volume = Some(value);
+            overrides.active_fade = None;
+            overrides.fade_request = None;
+            if value > 0.0 {
+                overrides.fade_return_volume = Some(value);
+            }
             Ok((
                 format!("ok: override volume set to {value:.2}\n"),
+                ServiceDirective::Continue,
+            ))
+        }
+        "fade-in" | "fade-out" => {
+            let default_seconds = if name == "fade-in" {
+                DEFAULT_FADE_IN_SECS
+            } else {
+                DEFAULT_FADE_OUT_SECS
+            };
+            let duration = match parse_live_fade_duration(parts.next(), default_seconds) {
+                Ok(duration) => duration,
+                Err(message) => return Ok((message, ServiceDirective::Continue)),
+            };
+            if state.now_playing.is_none() {
+                return Ok((
+                    "error: no current audio to fade\n".to_string(),
+                    ServiceDirective::Continue,
+                ));
+            }
+            let direction = if name == "fade-in" {
+                LiveVolumeFadeDirection::In
+            } else {
+                LiveVolumeFadeDirection::Out
+            };
+            overrides.fade_request = Some(LiveVolumeFadeRequest {
+                direction,
+                duration,
+            });
+            Ok((
+                format!("ok: {name} requested over {}s\n", duration.as_secs()),
                 ServiceDirective::Continue,
             ))
         }
@@ -366,6 +414,8 @@ fn handle_service_command(
                 }
             };
             overrides.mute = Some(value);
+            overrides.active_fade = None;
+            overrides.fade_request = None;
             Ok((
                 format!("ok: override mute set to {value}\n"),
                 ServiceDirective::Continue,
@@ -374,6 +424,8 @@ fn handle_service_command(
         "skip" => Ok(("ok: skip requested\n".to_string(), ServiceDirective::SkipCurrent)),
         "stop" => {
             state.audio_enabled = false;
+            overrides.active_fade = None;
+            overrides.fade_request = None;
             Ok((
                 "ok: audio playback stopped\n".to_string(),
                 ServiceDirective::StopAudio,
@@ -384,15 +436,28 @@ fn handle_service_command(
             ServiceDirective::StopService,
         )),
         "help" => Ok((
-            "ok: commands: status | play | stop | set-volume <0.0..1.0> | mute [on|off] | skip | shutdown\n"
+            "ok: commands: status | play | stop | set-volume <0.0..1.0> | fade-in [seconds] | fade-out [seconds] | mute [on|off] | skip | shutdown\n"
                 .to_string(),
             ServiceDirective::Continue,
         )),
         _ => Ok((
-            "error: unknown command. use: status | play | stop | set-volume <0.0..1.0> | mute [on|off] | skip | shutdown\n".to_string(),
+            "error: unknown command. use: status | play | stop | set-volume <0.0..1.0> | fade-in [seconds] | fade-out [seconds] | mute [on|off] | skip | shutdown\n".to_string(),
             ServiceDirective::Continue,
         )),
     }
+}
+
+fn parse_live_fade_duration(
+    value: Option<&str>,
+    default_seconds: u64,
+) -> std::result::Result<Duration, String> {
+    let Some(value) = value else {
+        return Ok(Duration::from_secs(default_seconds));
+    };
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "error: usage fade-in [seconds] | fade-out [seconds]\n".to_string())?;
+    Ok(Duration::from_secs(seconds))
 }
 
 fn play_entry_with_service_control(
@@ -531,16 +596,10 @@ fn play_source_with_service_control(
                 return Ok(ServiceDirective::StopService);
             }
             ServiceDirective::ReplaceCurrent => {
-                let (effective_volume, effective_mute) =
-                    resolve_effective_audio(entry.volume, entry.mute, *overrides);
                 fade_out_pipeline(
                     &playbin,
                     entry.fade_out_secs,
-                    if effective_mute {
-                        0.0
-                    } else {
-                        effective_volume
-                    },
+                    current_playbin_volume(&playbin),
                 );
                 println!("Schedule replacement requested for {}", label);
                 return Ok(ServiceDirective::ReplaceCurrent);
@@ -548,16 +607,10 @@ fn play_source_with_service_control(
         }
 
         if let Some(replacement) = pending_replacement(db_path, entry.id, entry.fade_out_secs)? {
-            let (effective_volume, effective_mute) =
-                resolve_effective_audio(entry.volume, entry.mute, *overrides);
             fade_out_pipeline(
                 &playbin,
                 replacement.fade_out_duration,
-                if effective_mute {
-                    0.0
-                } else {
-                    effective_volume
-                },
+                current_playbin_volume(&playbin),
             );
             println!("{} is replacing {}", replacement.label, label);
             return Ok(ServiceDirective::ReplaceCurrent);
@@ -580,6 +633,8 @@ fn play_source_with_service_control(
                 _ => {}
             }
         }
+
+        apply_pending_live_volume_fade_request(&playbin, overrides, entry.volume, entry.mute);
 
         let (effective_volume, effective_mute) =
             resolve_effective_audio(entry.volume, entry.mute, *overrides);
@@ -611,7 +666,9 @@ fn play_source_with_service_control(
             }
         }
 
-        if let Some(started) = fade_out_start {
+        if let Some(live_volume) = update_live_volume_fade(overrides) {
+            playbin.set_property("volume", live_volume);
+        } else if let Some(started) = fade_out_start {
             let ratio = (started.elapsed().as_secs_f64() / fade_out_secs as f64).min(1.0);
             playbin.set_property("volume", target_volume * (1.0 - ratio));
         } else if fade_in_secs == 0 || effective_mute {
@@ -623,6 +680,67 @@ fn play_source_with_service_control(
         .set_state(gst::State::Null)
         .context("Failed to stop GStreamer pipeline")?;
     Ok(ServiceDirective::Continue)
+}
+
+fn apply_pending_live_volume_fade_request(
+    playbin: &gst::Element,
+    overrides: &mut LiveOverrides,
+    base_volume: f64,
+    base_mute: bool,
+) {
+    let Some(request) = overrides.fade_request.take() else {
+        return;
+    };
+
+    let from_volume = current_playbin_volume(playbin);
+    let to_volume = match request.direction {
+        LiveVolumeFadeDirection::In => {
+            overrides.mute = Some(false);
+            overrides
+                .fade_return_volume
+                .or_else(|| overrides.volume.filter(|volume| *volume > 0.0))
+                .unwrap_or(base_volume)
+        }
+        LiveVolumeFadeDirection::Out => {
+            let (effective_volume, effective_mute) =
+                resolve_effective_audio(base_volume, base_mute, *overrides);
+            if !effective_mute && effective_volume > 0.0 {
+                overrides.fade_return_volume = Some(effective_volume);
+            }
+            0.0
+        }
+    };
+
+    overrides.active_fade = Some(LiveVolumeFade {
+        started_at: Instant::now(),
+        duration: request.duration,
+        from_volume,
+        to_volume,
+    });
+}
+
+fn update_live_volume_fade(overrides: &mut LiveOverrides) -> Option<f64> {
+    let fade = overrides.active_fade?;
+    let ratio = if fade.duration.is_zero() {
+        1.0
+    } else {
+        (fade.started_at.elapsed().as_secs_f64() / fade.duration.as_secs_f64()).min(1.0)
+    };
+    let volume = fade.from_volume + ((fade.to_volume - fade.from_volume) * ratio);
+
+    if ratio >= 1.0 {
+        overrides.active_fade = None;
+        overrides.volume = Some(fade.to_volume);
+        if fade.to_volume > 0.0 {
+            overrides.fade_return_volume = Some(fade.to_volume);
+        }
+    }
+
+    Some(volume)
+}
+
+fn current_playbin_volume(playbin: &gst::Element) -> f64 {
+    playbin.property::<f64>("volume").clamp(0.0, 1.0)
 }
 
 struct PendingReplacement {

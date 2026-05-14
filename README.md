@@ -10,6 +10,7 @@ service with CLI controls for play, stop, mute, volume, and skip.
 - Store schedules and cron rules in SQLite under `$HOME/.config/radio-rust`.
 - Store app configuration, named streams, and playback defaults in `radio-rust.json`.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
+- Fade the running service volume in or out from its current volume.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
 - Play a configurable Greenwich time signal at second 00 of each minute.
@@ -218,6 +219,8 @@ cargo run -- service status
 cargo run -- service play
 cargo run -- service stop
 cargo run -- service set-volume 0.50
+cargo run -- service fade-out 5
+cargo run -- service fade-in 5
 cargo run -- service mute
 cargo run -- service unmute
 cargo run -- service skip

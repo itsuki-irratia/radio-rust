@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::types::DEFAULT_SERVICE_SOCKET;
+use crate::types::{DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, DEFAULT_SERVICE_SOCKET};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Radio FM starter CLI + GUI")]
@@ -241,6 +241,18 @@ pub enum ServiceCommands {
     },
     SetVolume {
         value: f64,
+        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
+        socket: PathBuf,
+    },
+    FadeIn {
+        #[arg(default_value_t = DEFAULT_FADE_IN_SECS)]
+        seconds: u64,
+        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
+        socket: PathBuf,
+    },
+    FadeOut {
+        #[arg(default_value_t = DEFAULT_FADE_OUT_SECS)]
+        seconds: u64,
         #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
         socket: PathBuf,
     },

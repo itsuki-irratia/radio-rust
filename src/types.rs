@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 pub const SUPPORTED_EXTENSIONS: &[&str] =
     &["mp3", "aac", "flac", "ogg", "opus", "wav", "m4a", "xspf"];
@@ -199,6 +200,29 @@ impl Default for AppConfig {
 pub struct LiveOverrides {
     pub volume: Option<f64>,
     pub mute: Option<bool>,
+    pub fade_request: Option<LiveVolumeFadeRequest>,
+    pub active_fade: Option<LiveVolumeFade>,
+    pub fade_return_volume: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LiveVolumeFadeRequest {
+    pub direction: LiveVolumeFadeDirection,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LiveVolumeFadeDirection {
+    In,
+    Out,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LiveVolumeFade {
+    pub started_at: Instant,
+    pub duration: Duration,
+    pub from_volume: f64,
+    pub to_volume: f64,
 }
 
 #[derive(Debug, Clone)]
