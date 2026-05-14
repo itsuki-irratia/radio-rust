@@ -70,8 +70,8 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
                 &db,
                 &file,
                 &at,
-                fade_in.unwrap_or(config.playback.default_fade_in_secs),
-                fade_out.unwrap_or(config.playback.default_fade_out_secs),
+                fade_in.unwrap_or(config.fade.duration),
+                fade_out.unwrap_or(config.fade.duration),
                 volume.unwrap_or(config.playback.default_volume),
                 mute || config.playback.default_mute,
             )
@@ -156,8 +156,8 @@ fn run_cron_command(command: CronCommands) -> Result<()> {
                 &db,
                 &file,
                 &expr,
-                fade_in.unwrap_or(config.playback.default_fade_in_secs),
-                fade_out.unwrap_or(config.playback.default_fade_out_secs),
+                fade_in.unwrap_or(config.fade.duration),
+                fade_out.unwrap_or(config.fade.duration),
                 volume.unwrap_or(config.playback.default_volume),
                 mute || config.playback.default_mute,
             )

@@ -116,11 +116,21 @@ impl Default for TimeSignalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FadeConfig {
+    #[serde(default = "default_fade_duration_secs")]
+    pub duration: u64,
+}
+
+impl Default for FadeConfig {
+    fn default() -> Self {
+        Self {
+            duration: DEFAULT_FADE_IN_SECS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackConfig {
-    #[serde(default = "default_fade_in_secs")]
-    pub default_fade_in_secs: u64,
-    #[serde(default = "default_fade_out_secs")]
-    pub default_fade_out_secs: u64,
     #[serde(default = "default_volume")]
     pub default_volume: f64,
     #[serde(default)]
@@ -130,8 +140,6 @@ pub struct PlaybackConfig {
 impl Default for PlaybackConfig {
     fn default() -> Self {
         Self {
-            default_fade_in_secs: DEFAULT_FADE_IN_SECS,
-            default_fade_out_secs: DEFAULT_FADE_OUT_SECS,
             default_volume: DEFAULT_VOLUME,
             default_mute: false,
         }
@@ -173,8 +181,10 @@ impl Default for IcecastConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub fade: FadeConfig,
     #[serde(default)]
     pub playback: PlaybackConfig,
     #[serde(default)]
@@ -188,11 +198,66 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            fade: FadeConfig::default(),
             playback: PlaybackConfig::default(),
             streams: StreamDb::default(),
             time_signal: TimeSignalConfig::default(),
             icecast: IcecastConfig::default(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AppConfigInput {
+            #[serde(default)]
+            fade: Option<FadeConfig>,
+            #[serde(default)]
+            playback: PlaybackConfigInput,
+            #[serde(default)]
+            streams: StreamDb,
+            #[serde(default)]
+            time_signal: TimeSignalConfig,
+            #[serde(default)]
+            icecast: IcecastConfig,
+        }
+
+        #[derive(Default, Deserialize)]
+        struct PlaybackConfigInput {
+            #[serde(default = "default_volume")]
+            default_volume: f64,
+            #[serde(default)]
+            default_mute: bool,
+            #[serde(default)]
+            default_fade_in_secs: Option<u64>,
+            #[serde(default)]
+            default_fade_out_secs: Option<u64>,
+        }
+
+        let input = AppConfigInput::deserialize(deserializer)?;
+        let fade_duration = input
+            .fade
+            .map(|fade| fade.duration)
+            .or(input.playback.default_fade_in_secs)
+            .or(input.playback.default_fade_out_secs)
+            .unwrap_or(DEFAULT_FADE_IN_SECS);
+
+        Ok(Self {
+            fade: FadeConfig {
+                duration: fade_duration,
+            },
+            playback: PlaybackConfig {
+                default_volume: input.playback.default_volume,
+                default_mute: input.playback.default_mute,
+            },
+            streams: input.streams,
+            time_signal: input.time_signal,
+            icecast: input.icecast,
+        })
     }
 }
 
@@ -255,12 +320,8 @@ pub fn default_volume() -> f64 {
     DEFAULT_VOLUME
 }
 
-pub fn default_fade_in_secs() -> u64 {
+pub fn default_fade_duration_secs() -> u64 {
     DEFAULT_FADE_IN_SECS
-}
-
-pub fn default_fade_out_secs() -> u64 {
-    DEFAULT_FADE_OUT_SECS
 }
 
 pub fn default_icecast_mount() -> String {
@@ -273,4 +334,48 @@ pub fn default_icecast_username() -> String {
 
 pub fn default_enabled() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_playback_fade_defaults_migrate_to_fade_duration() {
+        let raw = r#"{
+            "playback": {
+                "default_fade_in_secs": 7,
+                "default_fade_out_secs": 9,
+                "default_volume": 0.4,
+                "default_mute": true
+            }
+        }"#;
+
+        let config: AppConfig = serde_json::from_str(raw).expect("legacy config parses");
+
+        assert_eq!(config.fade.duration, 7);
+        assert_eq!(config.playback.default_volume, 0.4);
+        assert!(config.playback.default_mute);
+    }
+
+    #[test]
+    fn app_config_serializes_fade_separately_from_playback() {
+        let config = AppConfig {
+            fade: FadeConfig { duration: 5 },
+            playback: PlaybackConfig {
+                default_volume: 1.0,
+                default_mute: false,
+            },
+            ..AppConfig::default()
+        };
+
+        let raw = serde_json::to_string_pretty(&config).expect("config serializes");
+
+        assert!(raw.contains("\"fade\""));
+        assert!(raw.contains("\"duration\": 5"));
+        assert!(raw.contains("\"playback\""));
+        assert!(raw.contains("\"default_volume\": 1.0"));
+        assert!(!raw.contains("default_fade_in_secs"));
+        assert!(!raw.contains("default_fade_out_secs"));
+    }
 }

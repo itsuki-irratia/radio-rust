@@ -58,6 +58,20 @@ $HOME/.config/radio-rust/radio-rust.json
 ```
 
 You can override it for config-aware commands with `--config /path/to/radio-rust.json`.
+The default scheduled fade duration is stored separately from playback volume
+settings:
+
+```json
+{
+  "fade": {
+    "duration": 5
+  },
+  "playback": {
+    "default_volume": 1.0,
+    "default_mute": false
+  }
+}
+```
 If a schedule database does not exist yet and a legacy JSON schedule file is present
 beside it, the entries are imported once into SQLite.
 
@@ -175,7 +189,7 @@ cargo run -- streams list --json
 
 ### Greenwich time signal
 
-The service can play a configured audio source at second 00 of each minute. The
+The service can play a configured audio source at minute 00 of each hour. The
 source and stream playback behavior are stored in `radio-rust.json`.
 
 Set the signal audio:
@@ -184,7 +198,7 @@ Set the signal audio:
 cargo run -- time-signal set-audio "/path/to/pips.mp3"
 ```
 
-Enable or disable the minute signal:
+Enable or disable the hourly signal:
 
 ```bash
 cargo run -- time-signal enable

@@ -54,6 +54,12 @@ pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
             if !raw.contains("\"icecast\"") {
                 needs_save = true;
             }
+            if !raw.contains("\"fade\"")
+                || raw.contains("\"default_fade_in_secs\"")
+                || raw.contains("\"default_fade_out_secs\"")
+            {
+                needs_save = true;
+            }
             serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse config file {}", config_path.display()))?
         }
@@ -133,6 +139,12 @@ fn ensure_builtin_streams(config: &mut AppConfig) -> bool {
 }
 
 fn validate_app_config(config: &AppConfig) -> Result<()> {
+    if config.fade.duration > i64::MAX as u64 {
+        bail!(
+            "Invalid fade duration {}. Use a smaller value",
+            config.fade.duration
+        );
+    }
     let volume = config.playback.default_volume;
     if !(0.0..=1.0).contains(&volume) {
         bail!("Invalid default volume {volume}. Use a value between 0.0 and 1.0");

@@ -8,12 +8,12 @@ service with CLI controls for play, stop, mute, volume, and skip.
 
 - Schedule local audio files, XSPF playlists, and HTTP/HTTPS streams.
 - Store schedules and cron rules in SQLite under `$HOME/.config/radio-rust`.
-- Store app configuration, named streams, and playback defaults in `radio-rust.json`.
+- Store app configuration, named streams, fade defaults, and playback defaults in `radio-rust.json`.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
 - Fade the running service volume in or out from its current volume.
 - Start late scheduled local audio from the calculated playback position.
 - Use Linux-style cron expressions for recurring programming.
-- Play a configurable Greenwich time signal at second 00 of each minute.
+- Play a configurable Greenwich time signal at minute 00 of each hour.
 - Capture the radio output device and publish it to an Icecast server.
 - Control a running service through a Unix socket.
 
@@ -111,13 +111,13 @@ cargo run -- streams list
 
 ## Greenwich Time Signal
 
-Set the audio used for the minute time signal:
+Set the audio used for the hourly time signal:
 
 ```bash
 cargo run -- time-signal set-audio "/path/to/pips.mp3"
 ```
 
-Enable or disable the minute signal:
+Enable or disable the hourly signal:
 
 ```bash
 cargo run -- time-signal enable
