@@ -28,7 +28,7 @@ use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
 };
 use crate::service::{run_service, send_service_command};
-use crate::streams::run_streams_list;
+use crate::streams::{run_streams_add, run_streams_list};
 use crate::time_signal::{
     run_time_signal_disable, run_time_signal_disable_during_streams, run_time_signal_enable,
     run_time_signal_enable_during_streams, run_time_signal_set_audio, run_time_signal_set_streams,
@@ -95,6 +95,12 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
 
 fn run_streams_command(command: StreamsCommands) -> Result<()> {
     match command {
+        StreamsCommands::Add {
+            slug,
+            name,
+            url,
+            config,
+        } => run_streams_add(&resolve_config_path(config)?, &slug, &name, &url),
         StreamsCommands::List { config, json } => {
             run_streams_list(&resolve_config_path(config)?, json)
         }

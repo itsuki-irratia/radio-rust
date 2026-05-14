@@ -4,14 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::types::{
     AppConfig, DEFAULT_CONFIG_DIR_NAME, DEFAULT_CONFIG_FILE_NAME, DEFAULT_SCHEDULE_DB_FILE_NAME,
-    StreamEntry,
 };
-
-const BUILTIN_STREAMS: &[(&str, &str, &str)] = &[(
-    "bizkaia-irratia",
-    "Bizkaia Irratia",
-    "https://server12.mediasector.es/listen/bizkaia_irratia/bizkaiairratia.mp3",
-)];
 
 pub fn default_config_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("HOME is not set")?;
@@ -44,7 +37,7 @@ pub fn resolve_db_path(db_path: Option<PathBuf>) -> Result<PathBuf> {
 
 pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
     let mut needs_save = !config_path.exists();
-    let mut config = if config_path.exists() {
+    let config = if config_path.exists() {
         let raw = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file {}", config_path.display()))?;
         if raw.trim().is_empty() {
@@ -67,7 +60,7 @@ pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
         AppConfig::default()
     };
 
-    if ensure_builtin_streams(&mut config) || needs_save {
+    if needs_save {
         save_app_config(config_path, &config)?;
     }
 
@@ -97,45 +90,6 @@ pub fn update_app_config(
     update(&mut config)?;
     save_app_config(config_path, &config)?;
     Ok(config)
-}
-
-fn ensure_builtin_streams(config: &mut AppConfig) -> bool {
-    let mut changed = false;
-    let mut next_id = config
-        .streams
-        .entries
-        .iter()
-        .map(|entry| entry.id)
-        .max()
-        .unwrap_or(0)
-        + 1;
-
-    for (slug, name, url) in BUILTIN_STREAMS {
-        if config
-            .streams
-            .entries
-            .iter()
-            .any(|entry| entry.slug == *slug || entry.url == *url)
-        {
-            continue;
-        }
-        config.streams.entries.push(StreamEntry {
-            id: next_id,
-            slug: (*slug).to_string(),
-            name: (*name).to_string(),
-            url: (*url).to_string(),
-        });
-        next_id += 1;
-        changed = true;
-    }
-
-    config.streams.entries.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then(a.id.cmp(&b.id))
-    });
-    changed
 }
 
 fn validate_app_config(config: &AppConfig) -> Result<()> {

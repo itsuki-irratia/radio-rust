@@ -175,6 +175,12 @@ scheduled replacement/fade behavior stays the same.
 
 Named streams are stored in `radio-rust.json`, not in the schedule database.
 
+Add or update a stream:
+
+```bash
+cargo run -- streams add itsuki-irratia "Itsuki Irratia" "https://irratia.itsuki.freemyip.com/itsuki.opus"
+```
+
 List streams:
 
 ```bash

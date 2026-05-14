@@ -103,7 +103,13 @@ cargo run -- schedule list
 
 ## Streams
 
-List named streams stored in `radio-rust.json`:
+Add named streams to `radio-rust.json`:
+
+```bash
+cargo run -- streams add itsuki-irratia "Itsuki Irratia" "https://irratia.itsuki.freemyip.com/itsuki.opus"
+```
+
+List named streams:
 
 ```bash
 cargo run -- streams list

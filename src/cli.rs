@@ -47,6 +47,13 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug)]
 pub enum StreamsCommands {
+    Add {
+        slug: String,
+        name: String,
+        url: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     List {
         #[arg(long)]
         config: Option<PathBuf>,
