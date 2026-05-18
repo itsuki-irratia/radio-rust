@@ -21,7 +21,6 @@ service with CLI controls for play, stop, mute, volume, and skip.
 
 - Rust toolchain with Cargo.
 - GStreamer runtime and plugins.
-- GTK 4 development/runtime libraries if you use the GUI.
 
 Debian/Ubuntu:
 
@@ -29,7 +28,6 @@ Debian/Ubuntu:
 sudo apt update
 sudo apt install --yes \
   build-essential git curl pkg-config clang cmake meson ninja-build \
-  libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
@@ -43,9 +41,8 @@ Manjaro/Arch:
 ```bash
 sudo pacman -S --needed \
   base-devel git rustup pkgconf clang cmake meson ninja \
-  gtk4 libadwaita \
   gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
-  gst-plugins-ugly gst-libav gst-plugin-pipewire gst-plugin-gtk4 \
+  gst-plugins-ugly gst-libav gst-plugin-pipewire \
   pipewire pipewire-pulse alsa-lib \
   sqlite openssl curl jq
 ```
@@ -236,12 +233,6 @@ cargo run -- service shutdown
 By default, the app uses `$HOME/.config/radio-rust/schedule.sqlite` for schedules and
 `$HOME/.config/radio-rust/radio-rust.json` for configuration. The default control socket is
 `/tmp/radio-fm.sock`. These can be changed with `--db`, `--config`, and `--socket`.
-
-## GUI
-
-```bash
-cargo run -- gui
-```
 
 ## More CLI Details
 

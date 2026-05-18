@@ -1,6 +1,6 @@
 [package]
 name = "radio-fm"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 license = "GPL-3.0-only"
 
@@ -9,7 +9,6 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 gstreamer = "0.24"
-gtk = { package = "gtk4", version = "0.10" }
 quick-xml = "0.38"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

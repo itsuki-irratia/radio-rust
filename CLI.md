@@ -447,14 +447,6 @@ Stop:
 systemctl --user stop radio-fm.service
 ```
 
-### GUI
-
-Opens the GTK window:
-
-```bash
-cargo run -- gui
-```
-
 ## Datetime formats for `--at`
 
 Accepted formats:

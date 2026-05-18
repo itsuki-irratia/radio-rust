@@ -42,7 +42,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
-    Gui,
 }
 
 #[derive(Subcommand, Debug)]

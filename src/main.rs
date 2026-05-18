@@ -1,7 +1,6 @@
 mod cli;
 mod config;
 mod cron;
-mod gui;
 mod icecast;
 mod playback;
 mod schedule;
@@ -45,10 +44,6 @@ fn main() -> Result<()> {
         Commands::Cron { command } => run_cron_command(command),
         Commands::Icecast { command } => run_icecast_command(command),
         Commands::Service { command } => run_service_command(command),
-        Commands::Gui => {
-            gui::run_gui();
-            Ok(())
-        }
     }
 }
 
