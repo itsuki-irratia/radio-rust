@@ -3,7 +3,7 @@
 ## Build and run
 
 ```bash
-cd /home/projects/radio-fm
+cd /home/projects/radio-rust
 cargo build
 ```
 
@@ -419,8 +419,8 @@ After=default.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/zital/projects/radio-fm
-ExecStart=/home/zital/projects/radio-fm/target/release/radio-fm service run --socket /tmp/radio-fm.sock
+WorkingDirectory=/home/zital/projects/radio-rust
+ExecStart=/home/zital/projects/radio-rust/target/release/radio-fm service run --socket /tmp/radio-fm.sock
 Restart=always
 RestartSec=2
 
