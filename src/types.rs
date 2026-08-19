@@ -13,6 +13,7 @@ pub const SERVICE_TICK_MS: u64 = 250;
 pub const DEFAULT_VOLUME: f64 = 1.0;
 pub const DEFAULT_FADE_IN_SECS: u64 = 5;
 pub const DEFAULT_FADE_OUT_SECS: u64 = 5;
+pub const DEFAULT_MCP_PORT: u16 = 3333;
 
 #[derive(Serialize)]
 pub struct ScanResult {
@@ -164,6 +165,34 @@ pub struct IcecastConfig {
     pub public: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub tokens: Vec<McpToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToken {
+    pub id: String,
+    pub name: String,
+    pub token_hash: String,
+    pub created_at: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: DEFAULT_MCP_PORT,
+            tokens: Vec::new(),
+        }
+    }
+}
+
 impl Default for IcecastConfig {
     fn default() -> Self {
         Self {
@@ -193,6 +222,8 @@ pub struct AppConfig {
     pub time_signal: TimeSignalConfig,
     #[serde(default)]
     pub icecast: IcecastConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Default for AppConfig {
@@ -203,6 +234,7 @@ impl Default for AppConfig {
             streams: StreamDb::default(),
             time_signal: TimeSignalConfig::default(),
             icecast: IcecastConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -224,6 +256,8 @@ impl<'de> Deserialize<'de> for AppConfig {
             time_signal: TimeSignalConfig,
             #[serde(default)]
             icecast: IcecastConfig,
+            #[serde(default)]
+            mcp: McpConfig,
         }
 
         #[derive(Default, Deserialize)]
@@ -257,6 +291,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             streams: input.streams,
             time_signal: input.time_signal,
             icecast: input.icecast,
+            mcp: input.mcp,
         })
     }
 }
@@ -336,6 +371,10 @@ pub fn default_enabled() -> bool {
     true
 }
 
+pub fn default_mcp_port() -> u16 {
+    DEFAULT_MCP_PORT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +416,14 @@ mod tests {
         assert!(raw.contains("\"default_volume\": 1.0"));
         assert!(!raw.contains("default_fade_in_secs"));
         assert!(!raw.contains("default_fade_out_secs"));
+    }
+
+    #[test]
+    fn app_config_defaults_mcp_to_disabled_with_a_port() {
+        let config: AppConfig = serde_json::from_str("{}").expect("empty config parses");
+
+        assert!(!config.mcp.enabled);
+        assert_eq!(config.mcp.port, DEFAULT_MCP_PORT);
+        assert!(config.mcp.tokens.is_empty());
     }
 }

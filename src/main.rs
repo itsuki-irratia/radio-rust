@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod cron;
 mod icecast;
+mod mcp;
 mod playback;
 mod schedule;
 mod service;
@@ -13,8 +14,8 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::cli::{
-    Cli, Commands, CronCommands, IcecastCommands, ScheduleCommands, ServiceCommands,
-    StreamsCommands, TimeSignalCommands,
+    Cli, Commands, CronCommands, IcecastCommands, McpCommands, McpTokenCommands, ScheduleCommands,
+    ServiceCommands, StreamsCommands, TimeSignalCommands,
 };
 use crate::config::{load_app_config, resolve_config_path, resolve_db_path};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
@@ -22,6 +23,10 @@ use crate::icecast::{
     IcecastConfigure, run_icecast_configure, run_icecast_devices, run_icecast_disable,
     run_icecast_enable, run_icecast_set_device, run_icecast_start, run_icecast_status,
     run_icecast_stream, run_icecast_test,
+};
+use crate::mcp::{
+    run_mcp_configure, run_mcp_disable, run_mcp_enable, run_mcp_server, run_mcp_status,
+    run_mcp_token_create, run_mcp_token_list, run_mcp_token_revoke,
 };
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
@@ -43,7 +48,41 @@ fn main() -> Result<()> {
         Commands::TimeSignal { command } => run_time_signal_command(command),
         Commands::Cron { command } => run_cron_command(command),
         Commands::Icecast { command } => run_icecast_command(command),
+        Commands::Mcp { command } => run_mcp_command(command),
         Commands::Service { command } => run_service_command(command),
+    }
+}
+
+fn run_mcp_command(command: McpCommands) -> Result<()> {
+    match command {
+        McpCommands::Configure {
+            port,
+            enabled,
+            config,
+        } => run_mcp_configure(
+            &resolve_config_path(config)?,
+            port,
+            parse_bool_arg(&enabled)?,
+        ),
+        McpCommands::Enable { config } => run_mcp_enable(&resolve_config_path(config)?),
+        McpCommands::Disable { config } => run_mcp_disable(&resolve_config_path(config)?),
+        McpCommands::Status { config, json } => run_mcp_status(&resolve_config_path(config)?, json),
+        McpCommands::Run { config, port } => run_mcp_server(&resolve_config_path(config)?, port),
+        McpCommands::Token { command } => run_mcp_token_command(command),
+    }
+}
+
+fn run_mcp_token_command(command: McpTokenCommands) -> Result<()> {
+    match command {
+        McpTokenCommands::Create { name, config } => {
+            run_mcp_token_create(&resolve_config_path(config)?, &name)
+        }
+        McpTokenCommands::List { config, json } => {
+            run_mcp_token_list(&resolve_config_path(config)?, json)
+        }
+        McpTokenCommands::Revoke { id, config } => {
+            run_mcp_token_revoke(&resolve_config_path(config)?, &id)
+        }
     }
 }
 

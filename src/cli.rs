@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::types::{DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, DEFAULT_SERVICE_SOCKET};
+use crate::types::{
+    DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, DEFAULT_MCP_PORT, DEFAULT_SERVICE_SOCKET,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Radio FM starter CLI + GUI")]
@@ -37,6 +39,10 @@ pub enum Commands {
     Icecast {
         #[command(subcommand)]
         command: IcecastCommands,
+    },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
     },
     Service {
         #[command(subcommand)]
@@ -185,6 +191,63 @@ pub enum IcecastCommands {
     },
     Stream {
         source: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpCommands {
+    Configure {
+        #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
+        port: u16,
+        #[arg(long, default_value = "true")]
+        enabled: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Enable {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Disable {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    Status {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    Token {
+        #[command(subcommand)]
+        command: McpTokenCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpTokenCommands {
+    Create {
+        #[arg(long, default_value = "default")]
+        name: String,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    List {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    Revoke {
+        id: String,
         #[arg(long)]
         config: Option<PathBuf>,
     },

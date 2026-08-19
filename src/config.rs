@@ -44,7 +44,7 @@ pub fn load_app_config(config_path: &Path) -> Result<AppConfig> {
             needs_save = true;
             AppConfig::default()
         } else {
-            if !raw.contains("\"icecast\"") {
+            if !raw.contains("\"icecast\"") || !raw.contains("\"mcp\"") {
                 needs_save = true;
             }
             if !raw.contains("\"fade\"")
@@ -102,6 +102,26 @@ fn validate_app_config(config: &AppConfig) -> Result<()> {
     let volume = config.playback.default_volume;
     if !(0.0..=1.0).contains(&volume) {
         bail!("Invalid default volume {volume}. Use a value between 0.0 and 1.0");
+    }
+    if config.mcp.port == 0 {
+        bail!("Invalid MCP port 0. Use a port between 1 and 65535");
+    }
+    for token in &config.mcp.tokens {
+        if token.id.trim().is_empty() || token.name.trim().is_empty() || token.created_at.is_empty()
+        {
+            bail!("Invalid MCP token entry. Token id, name, and creation time are required");
+        }
+        if token.token_hash.len() != 64
+            || !token
+                .token_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            bail!(
+                "Invalid MCP token entry {}. Its token hash is malformed",
+                token.id
+            );
+        }
     }
     Ok(())
 }

@@ -69,6 +69,11 @@ settings:
   "playback": {
     "default_volume": 1.0,
     "default_mute": false
+  },
+  "mcp": {
+    "enabled": false,
+    "port": 3333,
+    "tokens": []
   }
 }
 ```
@@ -234,6 +239,95 @@ cargo run -- time-signal status --json
 ```
 
 The aliases `greenwich` and `greenwitch` also work for the top-level command.
+
+### MCP server
+
+`radio-fm` can expose its CLI through a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
+Streamable HTTP server. Its settings are saved in `radio-rust.json` under the
+`mcp` key. The server listens only on `127.0.0.1`, so it is not reachable from
+other machines by default.
+
+Configure the port and enable MCP in one step:
+
+```bash
+cargo run -- mcp configure --port 3333
+```
+
+Create a token before making MCP HTTP requests. The token value is shown only
+once; the configuration file stores only its SHA-256 hash.
+
+```bash
+cargo run -- mcp token create --name "mi-cliente-mcp"
+```
+
+List token metadata or revoke a token by its ID:
+
+```bash
+cargo run -- mcp token list
+cargo run -- mcp token list --json
+cargo run -- mcp token revoke TOKEN_ID
+```
+
+Enable or disable it later without changing the configured port:
+
+```bash
+cargo run -- mcp enable
+cargo run -- mcp disable
+```
+
+Inspect the current configuration:
+
+```bash
+cargo run -- mcp status
+cargo run -- mcp status --json
+```
+
+Start the MCP server after it is enabled:
+
+```bash
+cargo run -- mcp run
+```
+
+The endpoint is `http://127.0.0.1:3333/mcp`. Use `--port` with `mcp run` for a
+one-off listener override; it does not modify the saved configuration:
+
+```bash
+cargo run -- mcp run --port 4444
+```
+
+Every `POST /mcp` call must include a valid bearer token. For example, after
+storing the value emitted by `mcp token create` in `RADIO_FM_MCP_TOKEN`:
+
+```bash
+curl -sS http://127.0.0.1:3333/mcp \
+  -H "Authorization: Bearer $RADIO_FM_MCP_TOKEN" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Calls without a valid token return HTTP `401 Unauthorized`. Token additions and
+revocations apply to the running server on its next request, without a restart.
+
+The server provides one `radio_fm_command` MCP tool. Give it an `arguments`
+array containing the same arguments that normally follow `radio-fm`, for
+example:
+
+```json
+{
+  "arguments": ["schedule", "list"]
+}
+```
+
+This keeps the MCP command surface aligned with the CLI, including schedule,
+cron, streams, time-signal, Icecast, and service control commands. Commands
+that intentionally run forever (`service run`, `icecast start`, and `mcp run`)
+must be launched from a terminal rather than through an MCP request.
+
+For an MCP client that accepts Streamable HTTP server definitions, point its
+`radio-fm` entry at the endpoint above. Keep the server on loopback unless you
+add your own network access controls, because MCP clients can invoke radio
+control commands.
 
 ### Service controls
 
