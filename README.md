@@ -16,6 +16,8 @@ service with CLI controls for play, stop, mute, volume, and skip.
 - Play a configurable Greenwich time signal at minute 00 of each hour.
 - Capture the radio output device and publish it to an Icecast server.
 - Control a running service through a Unix socket.
+- Expose least-privilege radio controls to local AI agents through MCP; see
+  [MCP.md](MCP.md).
 
 ## Requirements
 
