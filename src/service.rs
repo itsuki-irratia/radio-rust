@@ -3,6 +3,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
@@ -24,6 +25,10 @@ use crate::types::{
     LiveVolumeFadeDirection, LiveVolumeFadeRequest, SERVICE_TICK_MS, ScheduleEntry,
     ServiceDirective, ServiceState,
 };
+
+const MAX_SERVICE_COMMAND_BYTES: usize = 1024;
+const SERVICE_SOCKET_TIMEOUT: Duration = Duration::from_millis(100);
+const MAX_SERVICE_COMMANDS_PER_TICK: usize = 8;
 
 pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Result<()> {
     gst::init().context("Failed to initialize GStreamer")?;
@@ -96,18 +101,18 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
         state.now_playing = Some(entry.file.clone());
         state.now_playing_id = Some(entry.id);
 
-        let outcome = match play_entry_with_service_control(
-            &entry,
-            &listener,
-            &mut overrides,
-            &mut state,
+        let mut playback_context = ServicePlaybackContext {
+            listener: &listener,
+            overrides: &mut overrides,
+            state: &mut state,
             db_path,
             config_path,
-            db.entries.len(),
-            &mut last_time_signal_tick,
-            &mut time_signal_overlays,
-            &mut icecast_stream,
-        ) {
+            queued_items: db.entries.len(),
+            last_time_signal_tick: &mut last_time_signal_tick,
+            time_signal_overlays: &mut time_signal_overlays,
+            icecast_stream: &mut icecast_stream,
+        };
+        let outcome = match play_entry_with_service_control(&entry, &mut playback_context) {
             Ok(outcome) => outcome,
             Err(error) => {
                 eprintln!(
@@ -150,13 +155,28 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
         state.now_playing_id = None;
     }
 
-    if socket_path.exists() {
-        fs::remove_file(socket_path).with_context(|| {
-            format!(
-                "Failed to remove service socket after shutdown: {}",
-                socket_path.display()
-            )
-        })?;
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            fs::remove_file(socket_path).with_context(|| {
+                format!(
+                    "Failed to remove service socket after shutdown: {}",
+                    socket_path.display()
+                )
+            })?;
+        }
+        Ok(_) => eprintln!(
+            "Refusing to remove non-socket path after service shutdown: {}",
+            socket_path.display()
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect service socket path {} after shutdown",
+                    socket_path.display()
+                )
+            });
+        }
     }
 
     Ok(())
@@ -169,6 +189,12 @@ pub fn send_service_command(socket_path: &Path, command: &str) -> Result<String>
             socket_path.display()
         )
     })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .context("Failed to set service command read timeout")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("Failed to set service command write timeout")?;
     stream
         .write_all(format!("{command}\n").as_bytes())
         .context("Failed to send command to service")?;
@@ -195,13 +221,41 @@ pub fn send_service_command(socket_path: &Path, command: &str) -> Result<String>
 }
 
 fn bind_service_socket(socket_path: &Path) -> Result<UnixListener> {
-    if socket_path.exists() {
-        fs::remove_file(socket_path).with_context(|| {
+    if let Some(parent) = socket_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| {
             format!(
-                "Failed to remove previous socket file {}",
-                socket_path.display()
+                "Failed to create service socket directory {}",
+                parent.display()
             )
         })?;
+    }
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() {
+                bail!(
+                    "Refusing to remove non-socket path before binding service socket: {}",
+                    socket_path.display()
+                );
+            }
+            fs::remove_file(socket_path).with_context(|| {
+                format!(
+                    "Failed to remove previous socket file {}",
+                    socket_path.display()
+                )
+            })?;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect service socket path {}",
+                    socket_path.display()
+                )
+            });
+        }
     }
     let listener = UnixListener::bind(socket_path).with_context(|| {
         format!(
@@ -212,6 +266,12 @@ fn bind_service_socket(socket_path: &Path) -> Result<UnixListener> {
     listener
         .set_nonblocking(true)
         .context("Failed to set service socket non-blocking mode")?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600)).with_context(|| {
+        format!(
+            "Failed to restrict permissions on service socket {}",
+            socket_path.display()
+        )
+    })?;
     Ok(listener)
 }
 
@@ -222,12 +282,17 @@ fn process_pending_service_commands(
     queued_items: usize,
 ) -> Result<ServiceDirective> {
     let mut aggregate = ServiceDirective::Continue;
+    let mut processed = 0usize;
 
     loop {
+        if processed == MAX_SERVICE_COMMANDS_PER_TICK {
+            break;
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 let directive = handle_service_stream(stream, overrides, state, queued_items)?;
                 aggregate = merge_service_directive(aggregate, directive);
+                processed += 1;
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => break,
             Err(error) => return Err(error).context("Service socket accept failed"),
@@ -264,15 +329,29 @@ fn handle_service_stream(
     state: &mut ServiceState,
     queued_items: usize,
 ) -> Result<ServiceDirective> {
-    let mut command = String::new();
+    stream
+        .set_read_timeout(Some(SERVICE_SOCKET_TIMEOUT))
+        .context("Failed to set service socket read timeout")?;
+    stream
+        .set_write_timeout(Some(SERVICE_SOCKET_TIMEOUT))
+        .context("Failed to set service socket write timeout")?;
     let mut reader = BufReader::new(
         stream
             .try_clone()
             .context("Failed to clone service stream for reading")?,
     );
-    reader
-        .read_line(&mut command)
-        .context("Failed reading service command")?;
+    let command = match read_limited_service_command(&mut reader) {
+        Ok(command) => command,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::InvalidData
+            ) =>
+        {
+            return Ok(ServiceDirective::Continue);
+        }
+        Err(error) => return Err(error).context("Failed reading service command"),
+    };
 
     let (response, directive) =
         handle_service_command(command.trim(), overrides, state, queued_items)?;
@@ -283,6 +362,33 @@ fn handle_service_stream(
         .flush()
         .context("Failed flushing service response stream")?;
     Ok(directive)
+}
+
+fn read_limited_service_command(reader: &mut BufReader<UnixStream>) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if bytes.len() + take > MAX_SERVICE_COMMAND_BYTES {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "service command is too large",
+            ));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "service command is not UTF-8"))
 }
 
 fn handle_service_command(
@@ -460,24 +566,28 @@ fn parse_live_fade_duration(
     Ok(Duration::from_secs(seconds))
 }
 
+struct ServicePlaybackContext<'a> {
+    listener: &'a UnixListener,
+    overrides: &'a mut LiveOverrides,
+    state: &'a mut ServiceState,
+    db_path: &'a Path,
+    config_path: &'a Path,
+    queued_items: usize,
+    last_time_signal_tick: &'a mut Option<i64>,
+    time_signal_overlays: &'a mut Vec<TimeSignalOverlay>,
+    icecast_stream: &'a mut Option<crate::icecast::IcecastStream>,
+}
+
 fn play_entry_with_service_control(
     entry: &ScheduleEntry,
-    listener: &UnixListener,
-    overrides: &mut LiveOverrides,
-    state: &mut ServiceState,
-    db_path: &Path,
-    config_path: &Path,
-    queued_items: usize,
-    last_time_signal_tick: &mut Option<i64>,
-    time_signal_overlays: &mut Vec<TimeSignalOverlay>,
-    icecast_stream: &mut Option<crate::icecast::IcecastStream>,
+    context: &mut ServicePlaybackContext<'_>,
 ) -> Result<ServiceDirective> {
     validate_volume(entry.volume)?;
     let start_offset = scheduled_start_offset(entry);
     let sources = expand_playback_sources(&entry.file)?;
 
     for (index, source) in sources.iter().enumerate() {
-        state.now_playing = Some(source.clone());
+        context.state.now_playing = Some(source.clone());
         let outcome = play_source_with_service_control(
             entry,
             source,
@@ -492,15 +602,7 @@ fn play_entry_with_service_control(
             } else {
                 Duration::ZERO
             },
-            listener,
-            overrides,
-            state,
-            db_path,
-            config_path,
-            queued_items,
-            last_time_signal_tick,
-            time_signal_overlays,
-            icecast_stream,
+            context,
         )?;
 
         if outcome != ServiceDirective::Continue {
@@ -517,20 +619,18 @@ fn play_source_with_service_control(
     fade_in_secs: u64,
     fade_out_secs: u64,
     start_offset: Duration,
-    listener: &UnixListener,
-    overrides: &mut LiveOverrides,
-    state: &mut ServiceState,
-    db_path: &Path,
-    config_path: &Path,
-    queued_items: usize,
-    last_time_signal_tick: &mut Option<i64>,
-    time_signal_overlays: &mut Vec<TimeSignalOverlay>,
-    icecast_stream: &mut Option<crate::icecast::IcecastStream>,
+    context: &mut ServicePlaybackContext<'_>,
 ) -> Result<ServiceDirective> {
     validate_playback_source(source)?;
 
     let playbin = build_playbin_from_source(source)?;
-    apply_live_audio_state(&playbin, fade_in_secs, entry.volume, entry.mute, *overrides);
+    apply_live_audio_state(
+        &playbin,
+        fade_in_secs,
+        entry.volume,
+        entry.mute,
+        *context.overrides,
+    );
 
     if start_playbin_at_offset(&playbin, source, start_offset)? == PlaybackStart::PastEnd {
         println!(
@@ -560,23 +660,28 @@ fn play_source_with_service_control(
     let mut fade_out_start: Option<Instant> = None;
 
     loop {
-        poll_icecast_stream(icecast_stream);
+        poll_icecast_stream(context.icecast_stream);
         maybe_start_time_signal_overlay(
-            config_path,
+            context.config_path,
             Some(source),
-            last_time_signal_tick,
-            time_signal_overlays,
+            context.last_time_signal_tick,
+            context.time_signal_overlays,
         );
-        poll_time_signal_overlays(time_signal_overlays);
+        poll_time_signal_overlays(context.time_signal_overlays);
 
-        let directive = process_pending_service_commands(listener, overrides, state, queued_items)?;
+        let directive = process_pending_service_commands(
+            context.listener,
+            context.overrides,
+            context.state,
+            context.queued_items,
+        )?;
         match directive {
             ServiceDirective::Continue => {}
             ServiceDirective::SkipCurrent => {
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on skip request")?;
-                stop_time_signal_overlays(time_signal_overlays);
+                stop_time_signal_overlays(context.time_signal_overlays);
                 println!("Skip requested for {}", label);
                 return Ok(ServiceDirective::SkipCurrent);
             }
@@ -584,7 +689,7 @@ fn play_source_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on audio stop request")?;
-                stop_time_signal_overlays(time_signal_overlays);
+                stop_time_signal_overlays(context.time_signal_overlays);
                 println!("Stop requested for {}", label);
                 return Ok(ServiceDirective::StopAudio);
             }
@@ -592,7 +697,7 @@ fn play_source_with_service_control(
                 playbin
                     .set_state(gst::State::Null)
                     .context("Failed to stop pipeline on shutdown request")?;
-                stop_time_signal_overlays(time_signal_overlays);
+                stop_time_signal_overlays(context.time_signal_overlays);
                 return Ok(ServiceDirective::StopService);
             }
             ServiceDirective::ReplaceCurrent => {
@@ -606,7 +711,9 @@ fn play_source_with_service_control(
             }
         }
 
-        if let Some(replacement) = pending_replacement(db_path, entry.id, entry.fade_out_secs)? {
+        if let Some(replacement) =
+            pending_replacement(context.db_path, entry.id, entry.fade_out_secs)?
+        {
             fade_out_pipeline(
                 &playbin,
                 replacement.fade_out_duration,
@@ -634,10 +741,15 @@ fn play_source_with_service_control(
             }
         }
 
-        apply_pending_live_volume_fade_request(&playbin, overrides, entry.volume, entry.mute);
+        apply_pending_live_volume_fade_request(
+            &playbin,
+            context.overrides,
+            entry.volume,
+            entry.mute,
+        );
 
         let (effective_volume, effective_mute) =
-            resolve_effective_audio(entry.volume, entry.mute, *overrides);
+            resolve_effective_audio(entry.volume, entry.mute, *context.overrides);
         let target_volume = if effective_mute {
             0.0
         } else {
@@ -666,7 +778,7 @@ fn play_source_with_service_control(
             }
         }
 
-        if let Some(live_volume) = update_live_volume_fade(overrides) {
+        if let Some(live_volume) = update_live_volume_fade(context.overrides) {
             playbin.set_property("volume", live_volume);
         } else if let Some(started) = fade_out_start {
             let ratio = (started.elapsed().as_secs_f64() / fade_out_secs as f64).min(1.0);

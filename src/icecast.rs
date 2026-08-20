@@ -2,9 +2,11 @@ use anyhow::{Context, Result, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use serde::Serialize;
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use crate::config::{load_app_config, update_app_config};
@@ -13,6 +15,7 @@ use crate::types::IcecastConfig;
 
 const DEFAULT_ICECAST_PORT: u16 = 8000;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
+const MAX_PACTL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 pub struct IcecastConfigure {
     pub server: String,
@@ -154,15 +157,30 @@ pub fn run_icecast_test(config_path: &Path) -> Result<()> {
 }
 
 pub fn run_icecast_devices() -> Result<()> {
-    let output = Command::new("pactl")
+    let mut child = Command::new("pactl")
         .args(["list", "short", "sources"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .context("Failed to run pactl. Is PipeWire/PulseAudio installed?")?;
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture pactl output")?;
+    let reader = thread::spawn(move || read_capped_pactl_output(stdout));
+    let status = child.wait().context("Failed waiting for pactl")?;
+    let (stdout, truncated) = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("Failed to read pactl output"))?
+        .context("Failed to capture pactl output")?;
+    if !status.success() {
         bail!("pactl list short sources failed");
     }
+    if truncated {
+        bail!("pactl output exceeds the {MAX_PACTL_OUTPUT_BYTES} byte limit");
+    }
 
-    let raw = String::from_utf8(output.stdout).context("pactl output was not UTF-8")?;
+    let raw = String::from_utf8(stdout).context("pactl output was not UTF-8")?;
     for line in raw.lines() {
         let mut columns = line.split_whitespace();
         let _id = columns.next();
@@ -174,6 +192,23 @@ pub fn run_icecast_devices() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_capped_pactl_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut captured = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_PACTL_OUTPUT_BYTES.saturating_sub(captured.len());
+        let copied = remaining.min(read);
+        captured.extend_from_slice(&buffer[..copied]);
+        truncated |= copied < read;
+    }
+    Ok((captured, truncated))
 }
 
 pub fn run_icecast_set_device(config_path: &Path, device: &str) -> Result<()> {
@@ -473,6 +508,16 @@ fn normalize_server(server: &str) -> Result<String> {
     if trimmed.is_empty() {
         bail!("Icecast server cannot be empty");
     }
+    if trimmed.starts_with("https://") {
+        bail!(
+            "HTTPS Icecast servers are not supported: this build streams with HTTP only. Use an http:// endpoint or terminate TLS in a trusted proxy"
+        );
+    }
+    if let Some((scheme, _)) = trimmed.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("http") {
+            bail!("Unsupported Icecast server scheme {scheme}. Use http:// or a bare host");
+        }
+    }
     parse_server_endpoint(trimmed)?;
     Ok(trimmed.to_string())
 }
@@ -504,35 +549,97 @@ struct ServerEndpoint {
 }
 
 fn parse_server_endpoint(server: &str) -> Result<ServerEndpoint> {
-    let without_scheme = server
-        .strip_prefix("http://")
-        .or_else(|| server.strip_prefix("https://"))
-        .unwrap_or(server);
-    let authority = without_scheme
-        .split('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .context("Icecast server must include a host")?;
-    let authority = authority
-        .rsplit('@')
-        .next()
-        .context("Icecast server must include a host")?;
+    let without_scheme = server.strip_prefix("http://").unwrap_or(server);
+    if without_scheme.contains('/') || without_scheme.contains(['?', '#']) {
+        bail!("Icecast server must contain only a host and optional port");
+    }
+    if without_scheme.contains('@') {
+        bail!("Icecast server must not include user credentials");
+    }
+    if without_scheme.is_empty() || without_scheme.chars().any(char::is_whitespace) {
+        bail!("Icecast server must include a valid host");
+    }
 
-    if let Some((host, port)) = authority.rsplit_once(':') {
+    if let Some(rest) = without_scheme.strip_prefix('[') {
+        let (host, port_suffix) = rest
+            .split_once(']')
+            .context("IPv6 Icecast hosts must end with ]")?;
         if host.is_empty() {
             bail!("Icecast server host cannot be empty");
         }
-        let port = port
-            .parse::<u16>()
-            .with_context(|| format!("Invalid Icecast server port: {port}"))?;
+        let port = match port_suffix {
+            "" => DEFAULT_ICECAST_PORT,
+            value => parse_icecast_port(
+                value
+                    .strip_prefix(':')
+                    .context("Unexpected text after IPv6 Icecast host")?,
+            )?,
+        };
         return Ok(ServerEndpoint {
-            host: host.trim_matches(['[', ']']).to_string(),
+            host: host.to_string(),
             port,
         });
     }
 
+    if without_scheme.matches(':').count() > 1 {
+        bail!("IPv6 Icecast hosts must be enclosed in brackets");
+    }
+    if let Some((host, port)) = without_scheme.rsplit_once(':') {
+        if host.is_empty() {
+            bail!("Icecast server host cannot be empty");
+        }
+        return Ok(ServerEndpoint {
+            host: host.to_string(),
+            port: parse_icecast_port(port)?,
+        });
+    }
+
     Ok(ServerEndpoint {
-        host: authority.to_string(),
+        host: without_scheme.to_string(),
         port: DEFAULT_ICECAST_PORT,
     })
+}
+
+fn parse_icecast_port(raw: &str) -> Result<u16> {
+    let port = raw
+        .parse::<u16>()
+        .with_context(|| format!("Invalid Icecast server port: {raw}"))?;
+    if port == 0 {
+        bail!("Icecast server port must be between 1 and 65535");
+    }
+    Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_https_endpoint_that_pipeline_cannot_secure() {
+        assert!(normalize_server("https://radio.example:8443").is_err());
+        assert_eq!(
+            normalize_server("http://radio.example:8000").expect("HTTP is supported"),
+            "http://radio.example:8000"
+        );
+    }
+
+    #[test]
+    fn validates_icecast_authority_without_silently_discarding_parts() {
+        assert!(normalize_server("http://source:password@radio.example").is_err());
+        assert!(normalize_server("http://radio.example/stream").is_err());
+        assert!(normalize_server("http://radio.example:0").is_err());
+        let endpoint = parse_server_endpoint("http://[::1]:8000").expect("IPv6 parses");
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.port, 8000);
+    }
+
+    #[test]
+    fn limits_pactl_output_capture() {
+        let output = vec![b'x'; MAX_PACTL_OUTPUT_BYTES + 1];
+        let (captured, truncated) =
+            read_capped_pactl_output(std::io::Cursor::new(output)).expect("read output");
+
+        assert_eq!(captured.len(), MAX_PACTL_OUTPUT_BYTES);
+        assert!(truncated);
+    }
 }

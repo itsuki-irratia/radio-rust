@@ -8,12 +8,18 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::config::read_utf8_file_limited;
 use crate::playback::{
     canonical_playback_source, expand_playback_sources, is_xspf_source, play_file_with_fades_from,
 };
 use crate::types::{
-    DEFAULT_CONFIG_FILE_NAME, SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb, ScheduleEntry,
+    DEFAULT_CONFIG_FILE_NAME, PlaybackOptions, SUPPORTED_EXTENSIONS, ScanResult, ScheduleDb,
+    ScheduleEntry,
 };
+
+const MAX_LEGACY_SCHEDULE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCANNED_MEDIA_FILES: usize = 100_000;
+const MAX_SCANNED_DIRECTORIES: usize = 100_000;
 
 pub fn run_scan(folder: &Path, json: bool) -> Result<()> {
     if !folder.exists() {
@@ -56,20 +62,9 @@ pub fn run_schedule_add(
     db_path: &Path,
     file: &Path,
     at: &str,
-    fade_in: u64,
-    fade_out: u64,
-    volume: f64,
-    mute: bool,
+    playback: PlaybackOptions,
 ) -> Result<()> {
-    let source = file.display().to_string();
-    let canonical_source = canonical_playback_source(&source)?;
-    if !is_remote_media_source(&canonical_source) && !is_supported_media_file(file) {
-        bail!("Unsupported media extension for {}", file.display());
-    }
-    if is_xspf_source(&canonical_source) {
-        expand_playback_sources(&canonical_source)?;
-    }
-    validate_volume(volume)?;
+    let canonical_source = validate_and_canonicalize_media_source(file)?;
 
     let at_dt = parse_scheduled_datetime(at)?;
     let conn = open_schedule_db(db_path)?;
@@ -77,10 +72,10 @@ pub fn run_schedule_add(
         id: 0,
         file: canonical_source.clone(),
         at: at_dt,
-        fade_in_secs: fade_in,
-        fade_out_secs: fade_out,
-        volume,
-        mute,
+        fade_in_secs: playback.fade_in_secs,
+        fade_out_secs: playback.fade_out_secs,
+        volume: playback.volume,
+        mute: playback.mute,
     };
     let next_id = insert_new_schedule_entry(&conn, &entry)?;
 
@@ -88,10 +83,10 @@ pub fn run_schedule_add(
         "Added #{} at {} | fade-in {}s | fade-out {}s | volume {:.2} | mute {} | {}",
         next_id,
         at_dt.to_rfc3339(),
-        fade_in,
-        fade_out,
-        volume,
-        mute,
+        playback.fade_in_secs,
+        playback.fade_out_secs,
+        playback.volume,
+        playback.mute,
         canonical_source
     );
     Ok(())
@@ -298,12 +293,11 @@ fn import_legacy_json_schedule(db_path: &Path, conn: &Connection) -> Result<()> 
         return Ok(());
     }
 
-    let raw = fs::read_to_string(&legacy_path).with_context(|| {
-        format!(
-            "Failed to read legacy schedule file {}",
-            legacy_path.display()
-        )
-    })?;
+    let raw = read_utf8_file_limited(
+        &legacy_path,
+        MAX_LEGACY_SCHEDULE_BYTES,
+        "legacy schedule file",
+    )?;
     if raw.trim().is_empty() {
         return Ok(());
     }
@@ -319,9 +313,15 @@ fn import_legacy_json_schedule(db_path: &Path, conn: &Connection) -> Result<()> 
         return Ok(());
     }
 
+    let transaction = conn
+        .unchecked_transaction()
+        .context("Failed to start legacy schedule import transaction")?;
     for entry in &db.entries {
-        insert_schedule_entry(conn, entry)?;
+        insert_schedule_entry(&transaction, entry)?;
     }
+    transaction
+        .commit()
+        .context("Failed to commit legacy schedule import")?;
     eprintln!(
         "Imported {} scheduled item(s) from legacy JSON {} into {}",
         db.entries.len(),
@@ -419,22 +419,54 @@ pub fn validate_volume(volume: f64) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_and_canonicalize_media_source(file: &Path) -> Result<String> {
+    let source = file.display().to_string();
+    let canonical_source = canonical_playback_source(&source)?;
+    if !is_remote_media_source(&canonical_source) && !is_supported_media_file(file) {
+        bail!("Unsupported media extension for {}", file.display());
+    }
+    if is_xspf_source(&canonical_source) {
+        expand_playback_sources(&canonical_source)?;
+    }
+    Ok(canonical_source)
+}
+
 fn collect_media_files(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
-    let entries =
-        fs::read_dir(dir).with_context(|| format!("Failed reading directory {}", dir.display()))?;
+    let mut pending_directories = vec![dir.to_path_buf()];
+    let mut scanned_directories = 0usize;
 
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("Failed reading an entry in {}", dir.display()))?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_media_files(&path, output)?;
-            continue;
+    while let Some(directory) = pending_directories.pop() {
+        scanned_directories += 1;
+        if scanned_directories > MAX_SCANNED_DIRECTORIES {
+            bail!("Scan exceeds the {MAX_SCANNED_DIRECTORIES} directory limit");
         }
+        let entries = fs::read_dir(&directory)
+            .with_context(|| format!("Failed reading directory {}", directory.display()))?;
 
-        if is_supported_media_file(&path) {
-            output.push(path);
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("Failed reading an entry in {}", directory.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("Failed to inspect {}", path.display()))?;
+
+            // Do not follow links while scanning an operator-provided tree.
+            // A directory link can otherwise create an unbounded traversal cycle.
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending_directories.push(path);
+                continue;
+            }
+
+            if file_type.is_file() && is_supported_media_file(&path) {
+                if output.len() == MAX_SCANNED_MEDIA_FILES {
+                    bail!("Scan exceeds the {MAX_SCANNED_MEDIA_FILES} media-file limit");
+                }
+                output.push(path);
+            }
         }
     }
 

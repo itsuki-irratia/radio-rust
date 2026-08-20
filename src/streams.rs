@@ -19,7 +19,8 @@ pub fn run_streams_add(config_path: &Path, slug: &str, name: &str, url: &str) ->
             .map(|entry| entry.id)
             .max()
             .unwrap_or(0)
-            + 1;
+            .checked_add(1)
+            .context("Cannot add stream: stream identifier space is exhausted")?;
 
         let slug_index = config
             .streams

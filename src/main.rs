@@ -17,7 +17,9 @@ use crate::cli::{
     Cli, Commands, CronCommands, IcecastCommands, McpCommands, McpTokenCommands, ScheduleCommands,
     ServiceCommands, StreamsCommands, TimeSignalCommands,
 };
-use crate::config::{load_app_config, resolve_config_path, resolve_db_path};
+use crate::config::{
+    load_app_config, resolve_config_path, resolve_db_path, resolve_service_socket_path,
+};
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::icecast::{
     IcecastConfigure, run_icecast_configure, run_icecast_devices, run_icecast_disable,
@@ -38,6 +40,7 @@ use crate::time_signal::{
     run_time_signal_enable_during_streams, run_time_signal_set_audio, run_time_signal_set_streams,
     run_time_signal_status,
 };
+use crate::types::{AppConfig, PlaybackOptions};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -74,9 +77,11 @@ fn run_mcp_command(command: McpCommands) -> Result<()> {
 
 fn run_mcp_token_command(command: McpTokenCommands) -> Result<()> {
     match command {
-        McpTokenCommands::Create { name, config } => {
-            run_mcp_token_create(&resolve_config_path(config)?, &name)
-        }
+        McpTokenCommands::Create {
+            name,
+            scope,
+            config,
+        } => run_mcp_token_create(&resolve_config_path(config)?, &name, &scope),
         McpTokenCommands::List { config, json } => {
             run_mcp_token_list(&resolve_config_path(config)?, json)
         }
@@ -99,16 +104,8 @@ fn run_schedule_command(command: ScheduleCommands) -> Result<()> {
             config,
         } => {
             let db = resolve_db_path(db)?;
-            let config = load_app_config(&resolve_config_path(config)?)?;
-            run_schedule_add(
-                &db,
-                &file,
-                &at,
-                fade_in.unwrap_or(config.fade.duration),
-                fade_out.unwrap_or(config.fade.duration),
-                volume.unwrap_or(config.playback.default_volume),
-                mute || config.playback.default_mute,
-            )
+            let playback = resolve_playback_options(config, fade_in, fade_out, volume, mute)?;
+            run_schedule_add(&db, &file, &at, playback)
         }
         ScheduleCommands::List {
             db,
@@ -191,16 +188,8 @@ fn run_cron_command(command: CronCommands) -> Result<()> {
             config,
         } => {
             let db = resolve_db_path(db)?;
-            let config = load_app_config(&resolve_config_path(config)?)?;
-            run_cron_add(
-                &db,
-                &file,
-                &expr,
-                fade_in.unwrap_or(config.fade.duration),
-                fade_out.unwrap_or(config.fade.duration),
-                volume.unwrap_or(config.playback.default_volume),
-                mute || config.playback.default_mute,
-            )
+            let playback = resolve_playback_options(config, fade_in, fade_out, volume, mute)?;
+            run_cron_add(&db, &file, &expr, playback)
         }
         CronCommands::List { db, json } => run_cron_list(&resolve_db_path(db)?, json),
         CronCommands::Remove { id, db } => run_cron_remove(&resolve_db_path(db)?, id),
@@ -261,58 +250,90 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
         ServiceCommands::Run { db, config, socket } => run_service(
             &resolve_db_path(db)?,
             &resolve_config_path(config)?,
-            &socket,
+            &resolve_service_socket_path(socket)?,
         ),
-        ServiceCommands::Play { socket } => {
-            let response = send_service_command(&socket, "play")?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Status { socket } => {
-            let response = send_service_command(&socket, "status")?;
-            print!("{response}");
-            Ok(())
-        }
+        command => run_service_control_command(command),
+    }
+}
+
+fn resolve_playback_options(
+    config_path: Option<std::path::PathBuf>,
+    fade_in: Option<u64>,
+    fade_out: Option<u64>,
+    volume: Option<f64>,
+    mute: bool,
+) -> Result<PlaybackOptions> {
+    let config = load_app_config(&resolve_config_path(config_path)?)?;
+    Ok(playback_options_from_config(
+        &config, fade_in, fade_out, volume, mute,
+    ))
+}
+
+fn playback_options_from_config(
+    config: &AppConfig,
+    fade_in: Option<u64>,
+    fade_out: Option<u64>,
+    volume: Option<f64>,
+    mute: bool,
+) -> PlaybackOptions {
+    PlaybackOptions {
+        fade_in_secs: fade_in.unwrap_or(config.fade.duration),
+        fade_out_secs: fade_out.unwrap_or(config.fade.duration),
+        volume: volume.unwrap_or(config.playback.default_volume),
+        mute: mute || config.playback.default_mute,
+    }
+}
+
+fn run_service_control_command(command: ServiceCommands) -> Result<()> {
+    let (socket, request) = match command {
+        ServiceCommands::Play { socket } => (socket, "play".to_owned()),
+        ServiceCommands::Status { socket } => (socket, "status".to_owned()),
         ServiceCommands::SetVolume { value, socket } => {
             validate_volume(value)?;
-            let response = send_service_command(&socket, &format!("set-volume {value}"))?;
-            print!("{response}");
-            Ok(())
+            (socket, format!("set-volume {value}"))
         }
-        ServiceCommands::FadeIn { seconds, socket } => {
-            let response = send_service_command(&socket, &format!("fade-in {seconds}"))?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::FadeOut { seconds, socket } => {
-            let response = send_service_command(&socket, &format!("fade-out {seconds}"))?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Mute { socket } => {
-            let response = send_service_command(&socket, "mute on")?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Unmute { socket } => {
-            let response = send_service_command(&socket, "mute off")?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Skip { socket } => {
-            let response = send_service_command(&socket, "skip")?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Stop { socket } => {
-            let response = send_service_command(&socket, "stop")?;
-            print!("{response}");
-            Ok(())
-        }
-        ServiceCommands::Shutdown { socket } => {
-            let response = send_service_command(&socket, "shutdown")?;
-            print!("{response}");
-            Ok(())
-        }
+        ServiceCommands::FadeIn { seconds, socket } => (socket, format!("fade-in {seconds}")),
+        ServiceCommands::FadeOut { seconds, socket } => (socket, format!("fade-out {seconds}")),
+        ServiceCommands::Mute { socket } => (socket, "mute on".to_owned()),
+        ServiceCommands::Unmute { socket } => (socket, "mute off".to_owned()),
+        ServiceCommands::Skip { socket } => (socket, "skip".to_owned()),
+        ServiceCommands::Stop { socket } => (socket, "stop".to_owned()),
+        ServiceCommands::Shutdown { socket } => (socket, "shutdown".to_owned()),
+        ServiceCommands::Run { .. } => unreachable!("service run is handled separately"),
+    };
+    let response = send_service_command(&resolve_service_socket_path(socket)?, &request)?;
+    print!("{response}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::playback_options_from_config;
+    use crate::types::AppConfig;
+
+    #[test]
+    fn playback_options_use_config_defaults() {
+        let mut config = AppConfig::default();
+        config.fade.duration = 9;
+        config.playback.default_volume = 0.4;
+        config.playback.default_mute = true;
+
+        let options = playback_options_from_config(&config, None, None, None, false);
+
+        assert_eq!(options.fade_in_secs, 9);
+        assert_eq!(options.fade_out_secs, 9);
+        assert_eq!(options.volume, 0.4);
+        assert!(options.mute);
+    }
+
+    #[test]
+    fn playback_options_allow_explicit_values() {
+        let options =
+            playback_options_from_config(&AppConfig::default(), Some(1), Some(2), Some(0.3), true);
+
+        assert_eq!(options.fade_in_secs, 1);
+        assert_eq!(options.fade_out_secs, 2);
+        assert_eq!(options.volume, 0.3);
+        assert!(options.mute);
     }
 }

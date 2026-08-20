@@ -232,7 +232,9 @@ cargo run -- service shutdown
 
 By default, the app uses `$HOME/.config/radio-rust/schedule.sqlite` for schedules and
 `$HOME/.config/radio-rust/radio-rust.json` for configuration. The default control socket is
-`/tmp/radio-fm.sock`. These can be changed with `--db`, `--config`, and `--socket`.
+`$XDG_RUNTIME_DIR/radio-fm.sock`, falling back to
+`$HOME/.config/radio-rust/radio-fm.sock` when no XDG runtime directory is
+available. These can be changed with `--db`, `--config`, and `--socket`.
 
 ## More CLI Details
 

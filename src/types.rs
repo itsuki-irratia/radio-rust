@@ -8,12 +8,21 @@ pub const DEFAULT_CONFIG_DIR_NAME: &str = "radio-rust";
 pub const DEFAULT_CONFIG_FILE_NAME: &str = "radio-rust.json";
 pub const DEFAULT_SCHEDULE_DB_FILE_NAME: &str = "schedule.sqlite";
 pub const FADE_TICK_MS: u64 = 200;
-pub const DEFAULT_SERVICE_SOCKET: &str = "/tmp/radio-fm.sock";
+pub const DEFAULT_SERVICE_SOCKET_FILE_NAME: &str = "radio-fm.sock";
 pub const SERVICE_TICK_MS: u64 = 250;
 pub const DEFAULT_VOLUME: f64 = 1.0;
 pub const DEFAULT_FADE_IN_SECS: u64 = 5;
 pub const DEFAULT_FADE_OUT_SECS: u64 = 5;
 pub const DEFAULT_MCP_PORT: u16 = 3333;
+
+/// Playback values shared by scheduled and recurring entries.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaybackOptions {
+    pub fade_in_secs: u64,
+    pub fade_out_secs: u64,
+    pub volume: f64,
+    pub mute: bool,
+}
 
 #[derive(Serialize)]
 pub struct ScanResult {
@@ -181,6 +190,41 @@ pub struct McpToken {
     pub name: String,
     pub token_hash: String,
     pub created_at: String,
+    #[serde(default = "legacy_mcp_token_scope")]
+    pub scope: McpTokenScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTokenScope {
+    Read,
+    Control,
+    Admin,
+}
+
+impl McpTokenScope {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read" => Some(Self::Read),
+            "control" => Some(Self::Control),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Control => "control",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+fn legacy_mcp_token_scope() -> McpTokenScope {
+    // Configurations created before scopes existed granted full CLI access.
+    // Keep that behavior until their owners explicitly rotate the tokens.
+    McpTokenScope::Admin
 }
 
 impl Default for McpConfig {
@@ -210,7 +254,7 @@ impl Default for IcecastConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub fade: FadeConfig,
@@ -224,19 +268,6 @@ pub struct AppConfig {
     pub icecast: IcecastConfig,
     #[serde(default)]
     pub mcp: McpConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            fade: FadeConfig::default(),
-            playback: PlaybackConfig::default(),
-            streams: StreamDb::default(),
-            time_signal: TimeSignalConfig::default(),
-            icecast: IcecastConfig::default(),
-            mcp: McpConfig::default(),
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for AppConfig {
@@ -425,5 +456,19 @@ mod tests {
         assert!(!config.mcp.enabled);
         assert_eq!(config.mcp.port, DEFAULT_MCP_PORT);
         assert!(config.mcp.tokens.is_empty());
+    }
+
+    #[test]
+    fn legacy_mcp_tokens_keep_their_existing_admin_access() {
+        let raw = r#"{
+            "id": "token-id",
+            "name": "legacy",
+            "token_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "created_at": "2026-08-19T00:00:00Z"
+        }"#;
+
+        let token: McpToken = serde_json::from_str(raw).expect("legacy token parses");
+
+        assert_eq!(token.scope, McpTokenScope::Admin);
     }
 }

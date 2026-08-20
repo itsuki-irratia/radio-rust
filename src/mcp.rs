@@ -5,14 +5,29 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::thread;
+use std::time::Duration;
 
 use crate::config::{load_app_config, update_app_config};
-use crate::types::McpToken;
+use crate::types::{McpToken, McpTokenScope};
 
 const MCP_PATH: &str = "/mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+const MCP_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_JSON_RPC_BATCH_REQUESTS: usize = 32;
+const MAX_COMMAND_ARGUMENTS: usize = 64;
+const MAX_COMMAND_ARGUMENT_BYTES: usize = 8 * 1024;
 
 pub fn run_mcp_configure(config_path: &Path, port: u16, enabled: bool) -> Result<()> {
     validate_port(port)?;
@@ -82,22 +97,38 @@ pub fn run_mcp_server(config_path: &Path, port_override: Option<u16>) -> Result<
     println!("MCP server running at http://127.0.0.1:{port}{MCP_PATH}");
     println!("Press Ctrl-C to stop the MCP server.");
 
+    let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_connection(&mut stream, config_path) {
-                    eprintln!("MCP request failed: {error:#}");
-                    let _ = write_http_response(
-                        &mut stream,
-                        500,
-                        "Internal Server Error",
-                        Some(&json_rpc_error(
-                            Value::Null,
-                            -32603,
-                            "Internal server error",
-                        )),
-                    );
+                let active_connections = Arc::clone(&active_connections);
+                if active_connections
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < MAX_CONCURRENT_CONNECTIONS).then_some(count + 1)
+                    })
+                    .is_err()
+                {
+                    let _ = write_http_response(&mut stream, 503, "Service Unavailable", None);
+                    continue;
                 }
+
+                let config_path = config_path.to_path_buf();
+                thread::spawn(move || {
+                    if let Err(error) = handle_connection(&mut stream, &config_path) {
+                        eprintln!("MCP request failed: {error:#}");
+                        let _ = write_http_response(
+                            &mut stream,
+                            500,
+                            "Internal Server Error",
+                            Some(&json_rpc_error(
+                                Value::Null,
+                                -32603,
+                                "Internal server error",
+                            )),
+                        );
+                    }
+                    active_connections.fetch_sub(1, Ordering::Release);
+                });
             }
             Err(error) => eprintln!("MCP connection failed: {error}"),
         }
@@ -105,11 +136,13 @@ pub fn run_mcp_server(config_path: &Path, port_override: Option<u16>) -> Result<
     Ok(())
 }
 
-pub fn run_mcp_token_create(config_path: &Path, name: &str) -> Result<()> {
+pub fn run_mcp_token_create(config_path: &Path, name: &str, scope: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         bail!("MCP token name must not be empty");
     }
+    let scope = McpTokenScope::parse(scope)
+        .context("Invalid MCP token scope. Use read, control, or admin")?;
 
     let token = generate_token()?;
     let token_hash = hash_token(&token);
@@ -119,6 +152,7 @@ pub fn run_mcp_token_create(config_path: &Path, name: &str) -> Result<()> {
         name: name.to_string(),
         token_hash,
         created_at: chrono::Utc::now().to_rfc3339(),
+        scope,
     };
     update_app_config(config_path, |config| {
         if config.mcp.tokens.iter().any(|existing| existing.id == id) {
@@ -128,7 +162,10 @@ pub fn run_mcp_token_create(config_path: &Path, name: &str) -> Result<()> {
         Ok(())
     })?;
 
-    println!("MCP token created: id={id} name={name}");
+    println!(
+        "MCP token created: id={id} name={name} scope={}",
+        scope.as_str()
+    );
     println!("Store this token securely; it will not be shown again:");
     println!("{token}");
     Ok(())
@@ -144,6 +181,7 @@ pub fn run_mcp_token_list(config_path: &Path, json_output: bool) -> Result<()> {
                     "id": token.id,
                     "name": token.name,
                     "created_at": token.created_at,
+                    "scope": token.scope,
                 })
             })
             .collect::<Vec<_>>();
@@ -156,8 +194,11 @@ pub fn run_mcp_token_list(config_path: &Path, json_output: bool) -> Result<()> {
     }
     for token in tokens {
         println!(
-            "id={} name={} created_at={}",
-            token.id, token.name, token.created_at
+            "id={} name={} scope={} created_at={}",
+            token.id,
+            token.name,
+            token.scope.as_str(),
+            token.created_at
         );
     }
     Ok(())
@@ -188,11 +229,15 @@ fn validate_port(port: u16) -> Result<()> {
 }
 
 fn handle_connection(stream: &mut TcpStream, config_path: &Path) -> Result<()> {
+    stream
+        .set_read_timeout(Some(MCP_SOCKET_TIMEOUT))
+        .context("Failed to set MCP socket read timeout")?;
+    stream
+        .set_write_timeout(Some(MCP_SOCKET_TIMEOUT))
+        .context("Failed to set MCP socket write timeout")?;
     let mut reader = BufReader::new(stream.try_clone().context("Failed to read MCP request")?);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .context("Failed reading MCP request line")?;
+    let request_line =
+        read_limited_http_line(&mut reader, MAX_REQUEST_LINE_BYTES, "MCP request line")?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
@@ -203,11 +248,14 @@ fn handle_connection(stream: &mut TcpStream, config_path: &Path) -> Result<()> {
     let mut content_length = 0usize;
     let mut origin = None;
     let mut authorization = None;
+    let mut header_bytes = 0usize;
     loop {
-        let mut header = String::new();
-        reader
-            .read_line(&mut header)
-            .context("Failed reading MCP request header")?;
+        let header =
+            read_limited_http_line(&mut reader, MAX_HEADER_LINE_BYTES, "MCP request header")?;
+        header_bytes += header.len();
+        if header_bytes > MAX_HEADER_BYTES {
+            bail!("MCP request headers are too large");
+        }
         if header == "\r\n" || header == "\n" {
             break;
         }
@@ -240,9 +288,9 @@ fn handle_connection(stream: &mut TcpStream, config_path: &Path) -> Result<()> {
     if method != "POST" {
         return write_http_response(stream, 405, "Method Not Allowed", None);
     }
-    if !is_authorized(config_path, authorization.as_deref())? {
+    let Some(scope) = authorize(config_path, authorization.as_deref())? else {
         return write_http_response(stream, 401, "Unauthorized", None);
-    }
+    };
     if content_length > MAX_REQUEST_BODY_BYTES {
         return write_http_response(stream, 413, "Payload Too Large", None);
     }
@@ -263,11 +311,40 @@ fn handle_connection(stream: &mut TcpStream, config_path: &Path) -> Result<()> {
         }
     };
 
-    let response = handle_json_rpc_message(&request)?;
+    let response = handle_json_rpc_message(&request, scope, config_path)?;
     match response {
         Some(response) => write_http_response(stream, 200, "OK", Some(&response)),
         None => write_http_response(stream, 202, "Accepted", None),
     }
+}
+
+fn read_limited_http_line(
+    reader: &mut BufReader<TcpStream>,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .with_context(|| format!("Failed reading {label}"))?;
+        if available.is_empty() {
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if bytes.len() + take > max_bytes {
+            bail!("{label} exceeds {max_bytes} bytes");
+        }
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    String::from_utf8(bytes).with_context(|| format!("{label} is not valid UTF-8"))
 }
 
 fn generate_token() -> Result<String> {
@@ -276,32 +353,36 @@ fn generate_token() -> Result<String> {
         .context("Failed to open the system random source")?
         .read_exact(&mut bytes)
         .context("Failed to generate an MCP token")?;
-    Ok(format!(
-        "rfm_{}",
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
+    Ok(format!("rfm_{}", hex_encode(&bytes)))
 }
 
 fn hash_token(token: &str) -> String {
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex_encode(&Sha256::digest(token.as_bytes()))
 }
 
-fn is_authorized(config_path: &Path, authorization: Option<&str>) -> Result<bool> {
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn authorize(config_path: &Path, authorization: Option<&str>) -> Result<Option<McpTokenScope>> {
     let Some(token) = bearer_token(authorization) else {
-        return Ok(false);
+        return Ok(None);
     };
     let token_hash = hash_token(token);
     let config = load_app_config(config_path)?.mcp;
-    Ok(config.enabled
-        && config.tokens.iter().any(|stored| {
-            constant_time_equals(stored.token_hash.as_bytes(), token_hash.as_bytes())
-        }))
+    if !config.enabled {
+        return Ok(None);
+    }
+    Ok(config.tokens.iter().find_map(|stored| {
+        constant_time_equals(stored.token_hash.as_bytes(), token_hash.as_bytes())
+            .then_some(stored.scope)
+    }))
 }
 
 fn bearer_token(authorization: Option<&str>) -> Option<&str> {
@@ -341,24 +422,39 @@ fn is_allowed_origin(origin: Option<&str>) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]") && port.parse::<u16>().is_ok()
 }
 
-fn handle_json_rpc_message(request: &Value) -> Result<Option<Value>> {
+fn handle_json_rpc_message(
+    request: &Value,
+    scope: McpTokenScope,
+    config_path: &Path,
+) -> Result<Option<Value>> {
     if let Some(requests) = request.as_array() {
         if requests.is_empty() {
             return Ok(Some(json_rpc_error(Value::Null, -32600, "Invalid Request")));
         }
+        if requests.len() > MAX_JSON_RPC_BATCH_REQUESTS {
+            return Ok(Some(json_rpc_error(
+                Value::Null,
+                -32600,
+                "Too many requests in JSON-RPC batch",
+            )));
+        }
         let responses = requests
             .iter()
-            .map(handle_json_rpc_request)
+            .map(|request| handle_json_rpc_request(request, scope, config_path))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        return Ok((!responses.is_empty()).then(|| Value::Array(responses)));
+        return Ok((!responses.is_empty()).then_some(Value::Array(responses)));
     }
-    handle_json_rpc_request(request)
+    handle_json_rpc_request(request, scope, config_path)
 }
 
-fn handle_json_rpc_request(request: &Value) -> Result<Option<Value>> {
+fn handle_json_rpc_request(
+    request: &Value,
+    scope: McpTokenScope,
+    config_path: &Path,
+) -> Result<Option<Value>> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str);
     let Some(method) = method else {
@@ -377,8 +473,12 @@ fn handle_json_rpc_request(request: &Value) -> Result<Option<Value>> {
         })),
         "notifications/initialized" => return Ok(None),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": mcp_tools() })),
-        "tools/call" => call_tool(request.get("params").unwrap_or(&Value::Null)),
+        "tools/list" => Ok(json!({ "tools": mcp_tools(scope) })),
+        "tools/call" => call_tool(
+            request.get("params").unwrap_or(&Value::Null),
+            scope,
+            config_path,
+        ),
         _ => Err(anyhow::anyhow!("Method not found")),
     };
 
@@ -394,10 +494,10 @@ fn handle_json_rpc_request(request: &Value) -> Result<Option<Value>> {
     }))
 }
 
-fn mcp_tools() -> Vec<Value> {
+fn mcp_tools(scope: McpTokenScope) -> Vec<Value> {
     vec![json!({
         "name": "radio_fm_command",
-        "description": "Run a radio-fm CLI command. Pass its arguments exactly as they would follow `radio-fm`, for example [\"schedule\", \"list\"] or [\"service\", \"set-volume\", \"0.5\"]. Long-running server commands (`service run`, `icecast start`, and `mcp run`) are not available through this request/response tool.",
+        "description": format!("Run a radio-fm CLI command with a {}-scoped token. Pass its arguments exactly as they would follow `radio-fm`, for example [\"schedule\", \"list\"] or [\"service\", \"set-volume\", \"0.5\"]. Long-running server and playback commands are not available through this request/response tool.", scope.as_str()),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -414,7 +514,7 @@ fn mcp_tools() -> Vec<Value> {
     })]
 }
 
-fn call_tool(params: &Value) -> Result<Value> {
+fn call_tool(params: &Value, scope: McpTokenScope, config_path: &Path) -> Result<Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -437,24 +537,154 @@ fn call_tool(params: &Value) -> Result<Value> {
     if arguments.is_empty() {
         bail!("Tool argument `arguments` must not be empty");
     }
+    if arguments.len() > MAX_COMMAND_ARGUMENTS {
+        bail!("Tool argument `arguments` exceeds {MAX_COMMAND_ARGUMENTS} entries");
+    }
+    let argument_bytes = arguments.iter().map(String::len).sum::<usize>();
+    if argument_bytes > MAX_COMMAND_ARGUMENT_BYTES {
+        bail!("Tool argument `arguments` exceeds {MAX_COMMAND_ARGUMENT_BYTES} bytes");
+    }
     if is_long_running_command(&arguments) {
         bail!("Long-running commands must be started directly from a terminal");
     }
+    if !scope_allows_command(scope, &arguments) {
+        bail!(
+            "MCP token scope {} does not allow this command",
+            scope.as_str()
+        );
+    }
+    let arguments = add_server_config_argument(arguments, config_path)?;
 
     let executable = std::env::current_exe().context("Failed to locate radio-fm executable")?;
-    let output = Command::new(executable)
+    let mut child = Command::new(executable)
         .args(&arguments)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("Failed to run radio-fm command")?;
-    let text = format!(
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture radio-fm command output")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture radio-fm command errors")?;
+    let stdout_reader = thread::spawn(move || read_capped_command_output(stdout));
+    let stderr_reader = thread::spawn(move || read_capped_command_output(stderr));
+    let status = child
+        .wait()
+        .context("Failed waiting for radio-fm command")?;
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("Failed to read radio-fm command output"))?
+        .context("Failed to capture radio-fm command output")?;
+    let (stderr, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("Failed to read radio-fm command errors"))?
+        .context("Failed to capture radio-fm command errors")?;
+    let mut text = format!(
         "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
+    if stdout_truncated || stderr_truncated {
+        text.push_str("\n[Command output truncated to protect the MCP server]\n");
+    }
     Ok(json!({
         "content": [{ "type": "text", "text": if text.is_empty() { "Command completed without output" } else { &text } }],
-        "isError": !output.status.success()
+        "isError": !status.success()
     }))
+}
+
+fn add_server_config_argument(
+    mut arguments: Vec<String>,
+    config_path: &Path,
+) -> Result<Vec<String>> {
+    if arguments
+        .iter()
+        .any(|argument| argument == "--config" || argument.starts_with("--config="))
+    {
+        bail!("MCP commands must use the server configuration; do not pass --config");
+    }
+    let command = arguments.first().map(String::as_str);
+    let subcommand = arguments.get(1).map(String::as_str);
+    let accepts_config = matches!(
+        (command, subcommand),
+        (Some("schedule"), Some("add"))
+            | (Some("cron"), Some("add"))
+            | (Some("streams"), _)
+            | (Some("time-signal"), _)
+            | (
+                Some("icecast"),
+                Some(
+                    "configure"
+                        | "enable"
+                        | "disable"
+                        | "status"
+                        | "test"
+                        | "set-device"
+                        | "start"
+                        | "stream"
+                )
+            )
+            | (Some("mcp"), _)
+            | (Some("service"), Some("run"))
+    );
+    if accepts_config {
+        arguments.push("--config".to_string());
+        arguments.push(
+            config_path
+                .to_str()
+                .context("MCP server config path is not valid UTF-8")?
+                .to_string(),
+        );
+    }
+    Ok(arguments)
+}
+
+fn read_capped_command_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut captured = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(captured.len());
+        let copied = remaining.min(read);
+        captured.extend_from_slice(&buffer[..copied]);
+        truncated |= copied < read;
+    }
+    Ok((captured, truncated))
+}
+
+fn scope_allows_command(scope: McpTokenScope, arguments: &[String]) -> bool {
+    let command = arguments.first().map(String::as_str);
+    let subcommand = arguments.get(1).map(String::as_str);
+    match scope {
+        McpTokenScope::Admin => true,
+        McpTokenScope::Control => matches!(
+            command,
+            Some("schedule")
+                | Some("cron")
+                | Some("streams")
+                | Some("time-signal")
+                | Some("icecast")
+                | Some("service")
+        ),
+        McpTokenScope::Read => matches!(
+            (command, subcommand),
+            (Some("schedule"), Some("list"))
+                | (Some("cron"), Some("list"))
+                | (Some("streams"), Some("list"))
+                | (Some("time-signal"), Some("status"))
+                | (Some("icecast"), Some("status"))
+                | (Some("service"), Some("status"))
+                | (Some("mcp"), Some("status"))
+        ),
+    }
 }
 
 fn is_long_running_command(arguments: &[String]) -> bool {
@@ -465,7 +695,9 @@ fn is_long_running_command(arguments: &[String]) -> bool {
         ),
         (Some("service"), Some("run"))
             | (Some("icecast"), Some("start"))
+            | (Some("icecast"), Some("stream"))
             | (Some("mcp"), Some("run"))
+            | (Some("schedule"), Some("run"))
     )
 }
 
@@ -507,10 +739,13 @@ fn write_http_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::save_app_config;
+    use crate::types::AppConfig;
+    use std::net::Shutdown;
 
     #[test]
     fn exposes_the_cli_tool() {
-        let tools = mcp_tools();
+        let tools = mcp_tools(McpTokenScope::Read);
         assert_eq!(tools[0]["name"], "radio_fm_command");
     }
 
@@ -518,7 +753,12 @@ mod tests {
     fn rejects_server_commands_from_tool_calls() {
         assert!(is_long_running_command(&["service".into(), "run".into()]));
         assert!(is_long_running_command(&["icecast".into(), "start".into()]));
+        assert!(is_long_running_command(&[
+            "icecast".into(),
+            "stream".into()
+        ]));
         assert!(is_long_running_command(&["mcp".into(), "run".into()]));
+        assert!(is_long_running_command(&["schedule".into(), "run".into()]));
         assert!(!is_long_running_command(&["mcp".into(), "status".into()]));
         assert!(!is_long_running_command(&[
             "schedule".into(),
@@ -541,11 +781,28 @@ mod tests {
             { "jsonrpc": "2.0", "method": "notifications/initialized" },
             { "jsonrpc": "2.0", "id": 1, "method": "ping" }
         ]);
-        let response = handle_json_rpc_message(&request)
-            .expect("batch parses")
-            .expect("request response exists");
+        let response =
+            handle_json_rpc_message(&request, McpTokenScope::Read, Path::new("config.json"))
+                .expect("batch parses")
+                .expect("request response exists");
 
         assert_eq!(response.as_array().expect("response is an array").len(), 1);
+    }
+
+    #[test]
+    fn rejects_oversized_json_rpc_batches() {
+        let request = Value::Array(
+            std::iter::repeat_with(|| json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
+                .take(MAX_JSON_RPC_BATCH_REQUESTS + 1)
+                .collect(),
+        );
+
+        let response =
+            handle_json_rpc_message(&request, McpTokenScope::Read, Path::new("config.json"))
+                .expect("batch parses")
+                .expect("batch response exists");
+
+        assert_eq!(response["error"]["code"], -32600);
     }
 
     #[test]
@@ -556,9 +813,10 @@ mod tests {
             "method": "initialize",
             "params": { "protocolVersion": "older-version" }
         });
-        let response = handle_json_rpc_message(&request)
-            .expect("initialization parses")
-            .expect("initialization responds");
+        let response =
+            handle_json_rpc_message(&request, McpTokenScope::Read, Path::new("config.json"))
+                .expect("initialization parses")
+                .expect("initialization responds");
 
         assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
     }
@@ -570,5 +828,133 @@ mod tests {
         assert!(constant_time_equals(b"same", b"same"));
         assert!(!constant_time_equals(b"same", b"different"));
         assert_eq!(hash_token("token").len(), 64);
+    }
+
+    #[test]
+    fn token_scopes_limit_cli_commands() {
+        assert!(scope_allows_command(
+            McpTokenScope::Read,
+            &["schedule".into(), "list".into()]
+        ));
+        assert!(!scope_allows_command(
+            McpTokenScope::Read,
+            &["schedule".into(), "add".into()]
+        ));
+        assert!(scope_allows_command(
+            McpTokenScope::Control,
+            &["service".into(), "play".into()]
+        ));
+        assert!(!scope_allows_command(
+            McpTokenScope::Control,
+            &["mcp".into(), "token".into(), "create".into()]
+        ));
+        assert!(!scope_allows_command(
+            McpTokenScope::Control,
+            &["scan".into(), "/media".into()]
+        ));
+        assert!(scope_allows_command(
+            McpTokenScope::Admin,
+            &["mcp".into(), "token".into(), "create".into()]
+        ));
+    }
+
+    #[test]
+    fn command_output_is_capped_while_remaining_drained() {
+        let output = vec![b'x'; MAX_COMMAND_OUTPUT_BYTES + 1];
+        let (captured, truncated) =
+            read_capped_command_output(std::io::Cursor::new(output)).expect("read output");
+
+        assert_eq!(captured.len(), MAX_COMMAND_OUTPUT_BYTES);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn config_aware_mcp_commands_use_the_server_config() {
+        let arguments = add_server_config_argument(
+            vec!["streams".into(), "list".into()],
+            Path::new("/tmp/server.json"),
+        )
+        .expect("arguments are accepted");
+        assert_eq!(
+            arguments,
+            ["streams", "list", "--config", "/tmp/server.json"]
+        );
+        assert!(
+            add_server_config_argument(
+                vec![
+                    "streams".into(),
+                    "list".into(),
+                    "--config".into(),
+                    "other.json".into()
+                ],
+                Path::new("/tmp/server.json"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn http_mcp_requires_a_valid_bearer_token() {
+        let directory = std::env::temp_dir().join(format!(
+            "radio-fm-mcp-auth-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let config_path = directory.join("radio-rust.json");
+        let mut config = AppConfig::default();
+        config.mcp.enabled = true;
+        config.mcp.tokens.push(McpToken {
+            id: "test-token".to_string(),
+            name: "test".to_string(),
+            token_hash: hash_token("valid-token"),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            scope: McpTokenScope::Read,
+        });
+        save_app_config(&config_path, &config).expect("save test config");
+
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let authorized = send_http_request(
+            &config_path,
+            &format!(
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer valid-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(authorized.starts_with("HTTP/1.1 200 OK"));
+
+        let unauthorized = send_http_request(
+            &config_path,
+            &format!(
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized"));
+
+        std::fs::remove_dir_all(&directory).expect("remove test directory");
+    }
+
+    fn send_http_request(config_path: &Path, request: &str) -> String {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind test listener");
+        let address = listener.local_addr().expect("read listener address");
+        let config_path = config_path.to_path_buf();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test connection");
+            handle_connection(&mut stream, &config_path).expect("handle test request");
+        });
+
+        let mut stream = TcpStream::connect(address).expect("connect test listener");
+        stream
+            .write_all(request.as_bytes())
+            .expect("send test request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("finish test request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read test response");
+        worker.join().expect("join test server");
+        response
     }
 }

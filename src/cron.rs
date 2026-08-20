@@ -5,48 +5,35 @@ use rusqlite::{Connection, Row, params};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::playback::{canonical_playback_source, expand_playback_sources, is_xspf_source};
-use crate::schedule::{open_schedule_db, validate_volume};
-use crate::types::{CronDb, CronEntry, SUPPORTED_EXTENSIONS};
+use crate::schedule::{open_schedule_db, validate_and_canonicalize_media_source};
+use crate::types::{CronDb, CronEntry, PlaybackOptions};
 
 const CRON_LOOKBACK_SECS: i64 = 60;
 const CRON_LOOKAHEAD_SECS: i64 = 24 * 60 * 60;
+const CRON_RUN_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 pub fn run_cron_add(
     db_path: &Path,
     file: &Path,
     expression: &str,
-    fade_in: u64,
-    fade_out: u64,
-    volume: f64,
-    mute: bool,
+    playback: PlaybackOptions,
 ) -> Result<()> {
     let schedule = CronSchedule::parse(expression)?;
-    let source = file.display().to_string();
-    let canonical_source = canonical_playback_source(&source)?;
-    if !is_remote_media_source(&canonical_source) && !is_supported_media_file(file) {
-        bail!("Unsupported media extension for {}", file.display());
-    }
-    if is_xspf_source(&canonical_source) {
-        expand_playback_sources(&canonical_source)?;
-    }
-    validate_volume(volume)?;
+    let canonical_source = validate_and_canonicalize_media_source(file)?;
 
-    let conn = open_cron_db(db_path)?;
-    let next_id = insert_new_cron_entry(
-        &conn,
-        expression,
-        &canonical_source,
-        fade_in,
-        fade_out,
-        volume,
-        mute,
-    )?;
-    sync_cron_schedule_with_connection(&conn)?;
+    let mut conn = open_cron_db(db_path)?;
+    let next_id = insert_new_cron_entry(&conn, expression, &canonical_source, playback)?;
+    sync_cron_schedule_with_connection(&mut conn)?;
 
     println!(
         "Added cron #{} | {} | fade-in {}s | fade-out {}s | volume {:.2} | mute {} | {}",
-        next_id, schedule.expression, fade_in, fade_out, volume, mute, canonical_source
+        next_id,
+        schedule.expression,
+        playback.fade_in_secs,
+        playback.fade_out_secs,
+        playback.volume,
+        playback.mute,
+        canonical_source
     );
     Ok(())
 }
@@ -84,22 +71,30 @@ pub fn run_cron_list(db_path: &Path, json: bool) -> Result<()> {
 }
 
 pub fn run_cron_remove(db_path: &Path, id: u64) -> Result<()> {
-    let conn = open_cron_db(db_path)?;
+    let mut conn = open_cron_db(db_path)?;
     let id = i64::try_from(id).context("Cron id is too large for SQLite")?;
-    let removed = conn
+    let transaction = conn
+        .transaction()
+        .context("Failed to start cron removal transaction")?;
+    let removed = transaction
         .execute("DELETE FROM cron_entries WHERE id = ?1", params![id])
         .context("Failed to remove cron entry")?;
-    conn.execute(
-        "DELETE FROM schedule_entries WHERE cron_id = ?1",
-        params![id],
-    )
-    .context("Failed to remove materialized cron schedule entries")?;
-    conn.execute(
-        "DELETE FROM cron_runs WHERE cron_id = ?1
+    transaction
+        .execute(
+            "DELETE FROM schedule_entries WHERE cron_id = ?1",
+            params![id],
+        )
+        .context("Failed to remove materialized cron schedule entries")?;
+    transaction
+        .execute(
+            "DELETE FROM cron_runs WHERE cron_id = ?1
          AND at_unix_ms > ?2",
-        params![id, Local::now().timestamp_millis()],
-    )
-    .context("Failed to remove future cron run markers")?;
+            params![id, Local::now().timestamp_millis()],
+        )
+        .context("Failed to remove future cron run markers")?;
+    transaction
+        .commit()
+        .context("Failed to commit cron removal")?;
 
     if removed == 0 {
         println!("No cron item #{}", id);
@@ -110,8 +105,8 @@ pub fn run_cron_remove(db_path: &Path, id: u64) -> Result<()> {
 }
 
 pub fn sync_cron_schedule(db_path: &Path) -> Result<()> {
-    let conn = open_cron_db(db_path)?;
-    sync_cron_schedule_with_connection(&conn)
+    let mut conn = open_cron_db(db_path)?;
+    sync_cron_schedule_with_connection(&mut conn)
 }
 
 pub fn load_cron_entries(db_path: &Path) -> Result<CronDb> {
@@ -160,7 +155,7 @@ fn init_cron_schema(conn: &Connection) -> Result<()> {
     .context("Failed to initialize cron database schema")
 }
 
-fn sync_cron_schedule_with_connection(conn: &Connection) -> Result<()> {
+fn sync_cron_schedule_with_connection(conn: &mut Connection) -> Result<()> {
     init_cron_schema(conn)?;
     let entries = load_enabled_cron_entries(conn)?;
     let now = Local::now();
@@ -183,6 +178,12 @@ fn sync_cron_schedule_with_connection(conn: &Connection) -> Result<()> {
             materialize_cron_occurrence(conn, &entry, occurrence)?;
         }
     }
+    let cutoff = (now - chrono::Duration::seconds(CRON_RUN_RETENTION_SECS)).timestamp_millis();
+    conn.execute(
+        "DELETE FROM cron_runs WHERE at_unix_ms < ?1",
+        params![cutoff],
+    )
+    .context("Failed to prune old cron run markers")?;
     Ok(())
 }
 
@@ -202,13 +203,16 @@ fn load_enabled_cron_entries(conn: &Connection) -> Result<Vec<CronEntry>> {
 }
 
 fn materialize_cron_occurrence(
-    conn: &Connection,
+    conn: &mut Connection,
     entry: &CronEntry,
     at: DateTime<Local>,
 ) -> Result<()> {
     let cron_id = i64::try_from(entry.id).context("Cron id is too large for SQLite")?;
     let at_unix_ms = at.timestamp_millis();
-    let inserted_run = conn
+    let transaction = conn
+        .transaction()
+        .context("Failed to start cron materialization transaction")?;
+    let inserted_run = transaction
         .execute(
             "INSERT OR IGNORE INTO cron_runs (cron_id, at_unix_ms) VALUES (?1, ?2)",
             params![cron_id, at_unix_ms],
@@ -222,7 +226,7 @@ fn materialize_cron_occurrence(
         i64::try_from(entry.fade_in_secs).context("Fade-in seconds are too large for SQLite")?;
     let fade_out_secs =
         i64::try_from(entry.fade_out_secs).context("Fade-out seconds are too large for SQLite")?;
-    conn.execute(
+    transaction.execute(
         "INSERT INTO schedule_entries
             (file, at_unix_ms, at_rfc3339, fade_in_secs, fade_out_secs, volume, mute, cron_id, cron_at_unix_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -239,6 +243,9 @@ fn materialize_cron_occurrence(
         ],
     )
     .with_context(|| format!("Failed to materialize cron #{} at {}", entry.id, at.to_rfc3339()))?;
+    transaction
+        .commit()
+        .context("Failed to commit cron materialization")?;
     Ok(())
 }
 
@@ -246,13 +253,12 @@ fn insert_new_cron_entry(
     conn: &Connection,
     expression: &str,
     file: &str,
-    fade_in: u64,
-    fade_out: u64,
-    volume: f64,
-    mute: bool,
+    playback: PlaybackOptions,
 ) -> Result<u64> {
-    let fade_in = i64::try_from(fade_in).context("Fade-in seconds are too large for SQLite")?;
-    let fade_out = i64::try_from(fade_out).context("Fade-out seconds are too large for SQLite")?;
+    let fade_in =
+        i64::try_from(playback.fade_in_secs).context("Fade-in seconds are too large for SQLite")?;
+    let fade_out = i64::try_from(playback.fade_out_secs)
+        .context("Fade-out seconds are too large for SQLite")?;
     conn.execute(
         "INSERT INTO cron_entries
             (expression, file, fade_in_secs, fade_out_secs, volume, mute, enabled)
@@ -262,8 +268,8 @@ fn insert_new_cron_entry(
             file,
             fade_in,
             fade_out,
-            volume,
-            if mute { 1 } else { 0 },
+            playback.volume,
+            if playback.mute { 1 } else { 0 },
         ],
     )
     .context("Failed to insert cron entry")?;
@@ -511,15 +517,38 @@ fn round_down_to_minute(at: DateTime<Local>) -> DateTime<Local> {
         .unwrap_or(at)
 }
 
-fn is_supported_media_file(path: &Path) -> bool {
-    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-        return false;
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let extension_lower = extension.to_ascii_lowercase();
-    SUPPORTED_EXTENSIONS.contains(&extension_lower.as_str())
-}
+    #[test]
+    fn rolls_back_run_marker_when_schedule_materialization_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "radio-fm-cron-test-{}-{}.sqlite",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut conn = open_cron_db(&path).expect("open cron database");
+        conn.execute_batch("DROP TABLE schedule_entries")
+            .expect("remove schedule table to force materialization failure");
+        let entry = CronEntry {
+            id: 1,
+            expression: "* * * * *".to_string(),
+            file: "https://example.invalid/stream.ogg".to_string(),
+            fade_in_secs: 0,
+            fade_out_secs: 0,
+            volume: 1.0,
+            mute: false,
+            enabled: true,
+        };
 
-fn is_remote_media_source(source: &str) -> bool {
-    source.starts_with("http://") || source.starts_with("https://")
+        assert!(materialize_cron_occurrence(&mut conn, &entry, Local::now()).is_err());
+        let markers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cron_runs", [], |row| row.get(0))
+            .expect("read cron run markers");
+        assert_eq!(markers, 0);
+
+        drop(conn);
+        std::fs::remove_file(path).expect("remove test database");
+    }
 }

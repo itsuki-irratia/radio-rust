@@ -8,8 +8,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config::read_utf8_file_limited;
 use crate::schedule::validate_volume;
 use crate::types::{FADE_TICK_MS, LiveOverrides};
+
+const MAX_XSPF_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_XSPF_TRACKS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackStart {
@@ -171,9 +175,7 @@ pub fn apply_live_audio_state(
     let (effective_volume, effective_mute) =
         resolve_effective_audio(base_volume, base_mute, overrides);
     playbin.set_property("mute", effective_mute);
-    if fade_in_secs > 0 && !effective_mute {
-        playbin.set_property("volume", 0.0f64);
-    } else if effective_mute {
+    if fade_in_secs > 0 || effective_mute {
         playbin.set_property("volume", 0.0f64);
     } else {
         playbin.set_property("volume", effective_volume);
@@ -288,8 +290,17 @@ pub fn expand_playback_sources(source: &str) -> Result<Vec<String>> {
 
     let path = Path::new(source);
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read XSPF playlist {}", path.display()))?;
+    let size = fs::metadata(path)
+        .with_context(|| format!("Failed to inspect XSPF playlist {}", path.display()))?
+        .len();
+    if size > MAX_XSPF_BYTES {
+        bail!(
+            "XSPF playlist {} exceeds the {} byte limit",
+            path.display(),
+            MAX_XSPF_BYTES
+        );
+    }
+    let raw = read_utf8_file_limited(path, MAX_XSPF_BYTES as usize, "XSPF playlist")?;
     let mut reader = Reader::from_str(&raw);
     reader.config_mut().trim_text(true);
     let mut locations = Vec::new();
@@ -302,7 +313,12 @@ pub fn expand_playback_sources(source: &str) -> Result<Vec<String>> {
             Event::Start(element) if element.local_name().as_ref() == b"location" => {
                 let location = reader
                     .read_text(element.name())
-                    .context("Failed to read XSPF location")?;
+                    .context("Failed to read XSPF location")?
+                    .decode()
+                    .context("Failed to decode XSPF location")?;
+                if locations.len() == MAX_XSPF_TRACKS {
+                    bail!("XSPF playlist {} exceeds the track limit", path.display());
+                }
                 let source = resolve_xspf_location(location.trim(), base_dir)?;
                 locations.push(source);
             }

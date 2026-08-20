@@ -1,9 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::types::{
-    DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, DEFAULT_MCP_PORT, DEFAULT_SERVICE_SOCKET,
-};
+use crate::types::{DEFAULT_FADE_IN_SECS, DEFAULT_FADE_OUT_SECS, DEFAULT_MCP_PORT};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Radio FM starter CLI + GUI")]
@@ -237,6 +235,8 @@ pub enum McpTokenCommands {
     Create {
         #[arg(long, default_value = "default")]
         name: String,
+        #[arg(long, default_value = "read")]
+        scope: String,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -297,52 +297,52 @@ pub enum ServiceCommands {
         db: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Play {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Status {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     SetVolume {
         value: f64,
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     FadeIn {
         #[arg(default_value_t = DEFAULT_FADE_IN_SECS)]
         seconds: u64,
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     FadeOut {
         #[arg(default_value_t = DEFAULT_FADE_OUT_SECS)]
         seconds: u64,
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Mute {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Unmute {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Skip {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Stop {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     Shutdown {
-        #[arg(long, default_value = DEFAULT_SERVICE_SOCKET)]
-        socket: PathBuf,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
 }
