@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -11,7 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::{load_app_config, update_app_config};
 use crate::types::{McpToken, McpTokenScope};
@@ -28,6 +29,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_JSON_RPC_BATCH_REQUESTS: usize = 32;
 const MAX_COMMAND_ARGUMENTS: usize = 64;
 const MAX_COMMAND_ARGUMENT_BYTES: usize = 8 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn run_mcp_configure(config_path: &Path, port: u16, enabled: bool) -> Result<()> {
     validate_port(port)?;
@@ -556,12 +558,13 @@ fn call_tool(params: &Value, scope: McpTokenScope, config_path: &Path) -> Result
     let arguments = add_server_config_argument(arguments, config_path)?;
 
     let executable = std::env::current_exe().context("Failed to locate radio-fm executable")?;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(&arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to run radio-fm command")?;
+        .process_group(0);
+    let mut child = command.spawn().context("Failed to run radio-fm command")?;
     let stdout = child
         .stdout
         .take()
@@ -572,9 +575,14 @@ fn call_tool(params: &Value, scope: McpTokenScope, config_path: &Path) -> Result
         .context("Failed to capture radio-fm command errors")?;
     let stdout_reader = thread::spawn(move || read_capped_command_output(stdout));
     let stderr_reader = thread::spawn(move || read_capped_command_output(stderr));
-    let status = child
-        .wait()
-        .context("Failed waiting for radio-fm command")?;
+    let status = match wait_for_child(&mut child, COMMAND_TIMEOUT) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error);
+        }
+    };
     let (stdout, stdout_truncated) = stdout_reader
         .join()
         .map_err(|_| anyhow::anyhow!("Failed to read radio-fm command output"))?
@@ -595,6 +603,46 @@ fn call_tool(params: &Value, scope: McpTokenScope, config_path: &Path) -> Result
         "content": [{ "type": "text", "text": if text.is_empty() { "Command completed without output" } else { &text } }],
         "isError": !status.success()
     }))
+}
+
+fn wait_for_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                terminate_child_process_group(child);
+                let _ = child.wait();
+                bail!(
+                    "radio-fm command exceeded the {} second MCP execution limit",
+                    timeout.as_secs()
+                );
+            }
+            Err(error) => {
+                terminate_child_process_group(child);
+                let _ = child.wait();
+                return Err(error).context("Failed waiting for radio-fm command");
+            }
+        }
+    }
+}
+
+fn terminate_child_process_group(child: &mut std::process::Child) {
+    let Ok(process_group) = i32::try_from(child.id()) else {
+        return;
+    };
+    // The CLI may start helpers (for example, pactl); terminate them with the
+    // command so they cannot keep the captured output pipes open after timeout.
+    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if result != 0 {
+        let _ = child.kill();
+    }
 }
 
 fn add_server_config_argument(
@@ -663,11 +711,13 @@ fn read_capped_command_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>
 fn scope_allows_command(scope: McpTokenScope, arguments: &[String]) -> bool {
     let command = arguments.first().map(String::as_str);
     let subcommand = arguments.get(1).map(String::as_str);
+    let nested_subcommand = arguments.get(2).map(String::as_str);
     match scope {
         McpTokenScope::Admin => true,
         McpTokenScope::Control => matches!(
             command,
             Some("schedule")
+                | Some("programs")
                 | Some("cron")
                 | Some("streams")
                 | Some("time-signal")
@@ -675,14 +725,17 @@ fn scope_allows_command(scope: McpTokenScope, arguments: &[String]) -> bool {
                 | Some("service")
         ),
         McpTokenScope::Read => matches!(
-            (command, subcommand),
-            (Some("schedule"), Some("list"))
-                | (Some("cron"), Some("list"))
-                | (Some("streams"), Some("list"))
-                | (Some("time-signal"), Some("status"))
-                | (Some("icecast"), Some("status"))
-                | (Some("service"), Some("status"))
-                | (Some("mcp"), Some("status"))
+            (command, subcommand, nested_subcommand),
+            (Some("schedule"), Some("list"), _)
+                | (Some("programs"), Some("list"), _)
+                | (Some("programs"), Some("exception"), Some("list"))
+                | (Some("programs"), Some("special"), Some("list"))
+                | (Some("cron"), Some("list"), _)
+                | (Some("streams"), Some("list"), _)
+                | (Some("time-signal"), Some("status"), _)
+                | (Some("icecast"), Some("status"), _)
+                | (Some("service"), Some("status"), _)
+                | (Some("mcp"), Some("status"), _)
         ),
     }
 }
@@ -844,6 +897,22 @@ mod tests {
             McpTokenScope::Control,
             &["service".into(), "play".into()]
         ));
+        assert!(scope_allows_command(
+            McpTokenScope::Control,
+            &["programs".into(), "exception".into(), "set".into()]
+        ));
+        assert!(scope_allows_command(
+            McpTokenScope::Control,
+            &["programs".into(), "export".into()]
+        ));
+        assert!(scope_allows_command(
+            McpTokenScope::Read,
+            &["programs".into(), "special".into(), "list".into()]
+        ));
+        assert!(!scope_allows_command(
+            McpTokenScope::Read,
+            &["programs".into(), "exception".into(), "set".into()]
+        ));
         assert!(!scope_allows_command(
             McpTokenScope::Control,
             &["mcp".into(), "token".into(), "create".into()]
@@ -866,6 +935,19 @@ mod tests {
 
         assert_eq!(captured.len(), MAX_COMMAND_OUTPUT_BYTES);
         assert!(truncated);
+    }
+
+    #[test]
+    fn timed_out_child_process_is_stopped() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5 & wait"]).process_group(0);
+        let mut child = command.spawn().expect("start process group");
+
+        let error = wait_for_child(&mut child, Duration::from_millis(50))
+            .expect_err("long-running process should time out");
+
+        assert!(error.to_string().contains("execution limit"));
+        assert!(child.try_wait().expect("check child status").is_some());
     }
 
     #[test]

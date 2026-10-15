@@ -61,8 +61,8 @@ radio-fm mcp token create --name "operator" --scope admin
 
 | Scope | MCP permissions |
 | --- | --- |
-| `read` | `schedule list`, `cron list`, `streams list`, `time-signal status`, `icecast status`, `service status`, and `mcp status`. |
-| `control` | All non-blocking commands under `schedule`, `cron`, `streams`, `time-signal`, `icecast`, and `service`. It cannot manage MCP configuration or tokens. |
+| `read` | `schedule list`, program/exception/special `list`, `cron list`, `streams list`, `time-signal status`, `icecast status`, `service status`, and `mcp status`. |
+| `control` | All non-blocking commands under `schedule`, `programs`, `cron`, `streams`, `time-signal`, `icecast`, and `service`. It cannot manage MCP configuration or tokens. |
 | `admin` | Every non-blocking CLI command, including `scan` and MCP configuration/token management. |
 
 All scopes reject commands that would run indefinitely: `service run`,
@@ -210,6 +210,10 @@ each argument is already a separate string.
 | --- | --- | --- |
 | Inspect scheduled playback | `["schedule", "list", "--json"]` | `read` |
 | Add a scheduled item | `["schedule", "add", "/music/news.ogg", "--at", "2026-08-20 12:00", "--fade-in", "2"]` | `control` |
+| Inspect programs | `["programs", "list", "--json"]` | `read` |
+| Add a weekly program | `["programs", "add", "good-morning-vietnam", "GOOD MORNING VIETNAM", "--days", "mon-thu", "--start", "09:09", "--end", "11:00"]` | `control` |
+| Set a one-date exception | `["programs", "exception", "set", "good-morning-vietnam", "--date", "2026-10-05", "--cancel"]` | `control` |
+| Export monthly schedule | `["programs", "export", "--from-month", "2026-10", "--to-month", "2026-12", "--output-dir", "/srv/www/schedule"]` | `control` |
 | Inspect cron entries | `["cron", "list", "--json"]` | `read` |
 | Add or remove a cron rule | `["cron", "add", "/music/jingle.mp3", "--expr", "0 * * * *"]` or `["cron", "remove", "12"]` | `control` |
 | Inspect named streams | `["streams", "list", "--json"]` | `read` |
@@ -237,6 +241,7 @@ the `arguments` array.
 | --- | --- | --- |
 | `scan` | `scan FOLDER [--json]` | `admin` |
 | `schedule` | `add`, `list` | `control` for `add`; `read` for `list` |
+| `programs` | `add`, `update`, `list`, `remove`, `exception set/list/remove`, `special add/list/remove`, `export` | `control` except `list` operations, which are `read` |
 | `cron` | `add`, `list`, `remove` | `control` for `add`/`remove`; `read` for `list` |
 | `streams` | `add`, `list` | `control` for `add`; `read` for `list` |
 | `time-signal` | `set-audio`, `enable`, `disable`, `disable-during-streams`, `enable-during-streams`, `streams`, `status` | `control` except `status`, which is `read` |
@@ -255,8 +260,9 @@ server. Passing `--config` or `--config=...` from a tool call is rejected, so a
 client cannot redirect configuration writes to another file.
 
 Database options are regular CLI arguments. `schedule` and `cron` commands use
-the default schedule database unless `--db PATH` is provided. Grant MCP access
-only to agents trusted to use any paths that their token scope permits.
+the default schedule database, while `programs` uses its separate catalog database,
+unless `--db PATH` is provided. Grant MCP access only to agents trusted to use any
+paths that their token scope permits.
 
 ## Direct HTTP examples
 
@@ -297,6 +303,7 @@ limits:
 | JSON-RPC batch size | 32 requests |
 | Tool arguments | 64 strings and 8 KiB combined |
 | Captured stdout and stderr | 256 KiB each; excess output is drained and marked as truncated |
+| CLI command execution | 30 seconds; the command process group is stopped on timeout |
 
 Common HTTP responses are `401 Unauthorized` for a missing, invalid, revoked,
 or disabled token/server; `403 Forbidden` for a non-local `Origin`; `404 Not

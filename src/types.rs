@@ -7,6 +7,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] =
 pub const DEFAULT_CONFIG_DIR_NAME: &str = "radio-rust";
 pub const DEFAULT_CONFIG_FILE_NAME: &str = "radio-rust.json";
 pub const DEFAULT_SCHEDULE_DB_FILE_NAME: &str = "schedule.sqlite";
+pub const DEFAULT_PROGRAMS_DB_FILE_NAME: &str = "programs.sqlite";
 pub const FADE_TICK_MS: u64 = 200;
 pub const DEFAULT_SERVICE_SOCKET_FILE_NAME: &str = "radio-fm.sock";
 pub const SERVICE_TICK_MS: u64 = 250;

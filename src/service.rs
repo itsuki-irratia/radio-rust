@@ -29,6 +29,7 @@ use crate::types::{
 const MAX_SERVICE_COMMAND_BYTES: usize = 1024;
 const SERVICE_SOCKET_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_SERVICE_COMMANDS_PER_TICK: usize = 8;
+const ICECAST_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Result<()> {
     gst::init().context("Failed to initialize GStreamer")?;
@@ -44,6 +45,7 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
             None
         }
     };
+    let mut icecast_retry_at = Instant::now() + ICECAST_RETRY_DELAY;
 
     println!(
         "Service running. socket={} schedule_db={} config={}",
@@ -54,6 +56,18 @@ pub fn run_service(db_path: &Path, config_path: &Path, socket_path: &Path) -> Re
 
     loop {
         poll_icecast_stream(&mut icecast_stream);
+        if icecast_stream.is_none() && Instant::now() >= icecast_retry_at {
+            match start_icecast_device_stream(config_path) {
+                Ok(stream) => icecast_stream = stream,
+                Err(error) => {
+                    eprintln!(
+                        "Failed to start Icecast device stream; retrying in {}s: {error:#}",
+                        ICECAST_RETRY_DELAY.as_secs()
+                    );
+                }
+            }
+            icecast_retry_at = Instant::now() + ICECAST_RETRY_DELAY;
+        }
         sync_cron_schedule(db_path)?;
         let mut db = load_schedule(db_path)?;
         sort_schedule_entries(&mut db.entries);
@@ -239,6 +253,25 @@ fn bind_service_socket(socket_path: &Path) -> Result<UnixListener> {
                     "Refusing to remove non-socket path before binding service socket: {}",
                     socket_path.display()
                 );
+            }
+            match UnixStream::connect(socket_path) {
+                Ok(_) => bail!(
+                    "A radio-fm service is already listening on {}",
+                    socket_path.display()
+                ),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                    ) => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to determine whether service socket {} is active",
+                            socket_path.display()
+                        )
+                    });
+                }
             }
             fs::remove_file(socket_path).with_context(|| {
                 format!(
@@ -1028,4 +1061,47 @@ fn fade_out_pipeline(playbin: &gst::Element, fade_out_secs: u64, start_volume: f
         thread::sleep(Duration::from_millis(FADE_TICK_MS));
     }
     let _ = playbin.set_state(gst::State::Null);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_service_socket;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+
+    fn unique_socket_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "radio-fm-service-socket-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is after UNIX epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn refuses_to_replace_an_active_service_socket() {
+        let path = unique_socket_path();
+        let listener = UnixListener::bind(&path).expect("bind active test socket");
+
+        assert!(bind_service_socket(&path).is_err());
+        assert!(UnixStream::connect(&path).is_ok());
+
+        drop(listener);
+        std::fs::remove_file(path).expect("remove active test socket");
+    }
+
+    #[test]
+    fn replaces_a_stale_service_socket() {
+        let path = unique_socket_path();
+        let stale_listener = UnixListener::bind(&path).expect("bind stale test socket");
+        drop(stale_listener);
+
+        let listener = bind_service_socket(&path).expect("replace stale test socket");
+        assert!(UnixStream::connect(&path).is_ok());
+
+        drop(listener);
+        std::fs::remove_file(path).expect("remove replacement test socket");
+    }
 }

@@ -7,7 +7,9 @@ service with CLI controls for play, stop, mute, volume, and skip.
 ## Features
 
 - Schedule local audio files, XSPF playlists, and HTTP/HTTPS streams.
+- Maintain an independent public programs calendar and export monthly JSON for a website.
 - Store schedules and cron rules in SQLite under `$HOME/.config/radio-rust`.
+- Store the separate public-program catalog in `programs.sqlite` under the same directory.
 - Store app configuration, named streams, fade defaults, and playback defaults in `radio-rust.json`.
 - Fade out the currently playing item before scheduled replacement and fade in the new item.
 - Fade the running service volume in or out from its current volume.

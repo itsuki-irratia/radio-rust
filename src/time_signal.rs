@@ -98,12 +98,14 @@ pub fn due_time_signal_tick(
     now: DateTime<Local>,
     last_tick: Option<i64>,
 ) -> Option<i64> {
-    if !config.enabled || config.source.is_none() || now.minute() != 0 || now.second() != 0 {
+    if !config.enabled || config.source.is_none() || now.minute() > 1 {
         return None;
     }
 
     let tick = hour_key(now);
-    (Some(tick) != last_tick).then_some(tick)
+    let at_hour_boundary = now.minute() == 0 && now.second() == 0;
+    let delayed_boundary = last_tick.is_some_and(|last| tick > last);
+    ((at_hour_boundary || delayed_boundary) && Some(tick) != last_tick).then_some(tick)
 }
 
 fn hour_key(now: DateTime<Local>) -> i64 {
@@ -114,7 +116,7 @@ fn hour_key(now: DateTime<Local>) -> i64 {
 mod tests {
     use chrono::{Local, TimeZone};
 
-    use super::due_time_signal_tick;
+    use super::{due_time_signal_tick, hour_key};
     use crate::types::TimeSignalConfig;
 
     fn enabled_config() -> TimeSignalConfig {
@@ -150,6 +152,18 @@ mod tests {
         assert_eq!(
             due_time_signal_tick(&enabled_config(), due, last_tick),
             None
+        );
+    }
+
+    #[test]
+    fn delayed_service_tick_catches_up_during_first_minute() {
+        let previous = Local.with_ymd_and_hms(2026, 5, 11, 17, 0, 0).unwrap();
+        let delayed = Local.with_ymd_and_hms(2026, 5, 11, 18, 1, 0).unwrap();
+        let last_tick = due_time_signal_tick(&enabled_config(), previous, None);
+
+        assert_eq!(
+            due_time_signal_tick(&enabled_config(), delayed, last_tick),
+            Some(hour_key(delayed))
         );
     }
 }

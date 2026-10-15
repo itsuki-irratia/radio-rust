@@ -21,6 +21,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: ScheduleCommands,
     },
+    Programs {
+        #[command(subcommand)]
+        command: ProgramsCommands,
+    },
     Streams {
         #[command(subcommand)]
         command: StreamsCommands,
@@ -285,6 +289,151 @@ pub enum ScheduleCommands {
         to: Option<String>,
     },
     Run {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProgramsCommands {
+    Add {
+        slug: String,
+        name: String,
+        #[arg(long)]
+        days: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    Update {
+        slug: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        days: Option<String>,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        end: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        enabled: Option<bool>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    Remove {
+        slug: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    Exception {
+        #[command(subcommand)]
+        command: ProgramExceptionCommands,
+    },
+    Special {
+        #[command(subcommand)]
+        command: SpecialProgramCommands,
+    },
+    Export {
+        #[arg(long)]
+        from_month: String,
+        #[arg(long)]
+        to_month: String,
+        #[arg(long)]
+        output_dir: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProgramExceptionCommands {
+    Set {
+        slug: String,
+        #[arg(long)]
+        date: String,
+        #[arg(long, default_value_t = false)]
+        cancel: bool,
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long)]
+        end: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    List {
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    Remove {
+        slug: String,
+        date: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SpecialProgramCommands {
+    Add {
+        slug: String,
+        name: String,
+        #[arg(long)]
+        date: String,
+        #[arg(long)]
+        start: String,
+        #[arg(long)]
+        end: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    List {
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    Remove {
+        slug: String,
+        date: String,
         #[arg(long)]
         db: Option<PathBuf>,
     },

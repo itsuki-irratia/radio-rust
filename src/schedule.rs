@@ -162,8 +162,9 @@ pub fn run_schedule_run(db_path: &Path) -> Result<()> {
             let wait = (next.at - now)
                 .to_std()
                 .context("Failed converting schedule delay to std::time::Duration")?;
-            println!("Waiting until {} for #{}...", next.at.to_rfc3339(), next.id);
-            thread::sleep(wait);
+            println!("Waiting for #{} at {}...", next.id, next.at.to_rfc3339());
+            thread::sleep(wait.min(Duration::from_secs(1)));
+            continue;
         } else {
             println!(
                 "Item #{} is in the past ({}), starting now...",

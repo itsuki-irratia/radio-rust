@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::types::{
-    AppConfig, DEFAULT_CONFIG_DIR_NAME, DEFAULT_CONFIG_FILE_NAME, DEFAULT_SCHEDULE_DB_FILE_NAME,
-    DEFAULT_SERVICE_SOCKET_FILE_NAME,
+    AppConfig, DEFAULT_CONFIG_DIR_NAME, DEFAULT_CONFIG_FILE_NAME, DEFAULT_PROGRAMS_DB_FILE_NAME,
+    DEFAULT_SCHEDULE_DB_FILE_NAME, DEFAULT_SERVICE_SOCKET_FILE_NAME,
 };
 
 pub fn default_config_dir() -> Result<PathBuf> {
@@ -27,6 +27,10 @@ pub fn default_config_path() -> Result<PathBuf> {
 
 pub fn default_schedule_db_path() -> Result<PathBuf> {
     Ok(default_config_dir()?.join(DEFAULT_SCHEDULE_DB_FILE_NAME))
+}
+
+pub fn default_programs_db_path() -> Result<PathBuf> {
+    Ok(default_config_dir()?.join(DEFAULT_PROGRAMS_DB_FILE_NAME))
 }
 
 pub fn default_service_socket_path() -> Result<PathBuf> {
@@ -51,6 +55,13 @@ pub fn resolve_db_path(db_path: Option<PathBuf>) -> Result<PathBuf> {
     match db_path {
         Some(path) => Ok(path),
         None => default_schedule_db_path(),
+    }
+}
+
+pub fn resolve_programs_db_path(db_path: Option<PathBuf>) -> Result<PathBuf> {
+    match db_path {
+        Some(path) => Ok(path),
+        None => default_programs_db_path(),
     }
 }
 

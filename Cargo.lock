@@ -690,13 +690,14 @@ dependencies = [
 
 [[package]]
 name = "radio-fm"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "fs2",
  "gstreamer",
+ "libc",
  "quick-xml",
  "rusqlite",
  "serde",

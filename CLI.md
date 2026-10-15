@@ -51,6 +51,15 @@ The default schedule database is:
 $HOME/.config/radio-rust/schedule.sqlite
 ```
 
+The public programs catalog is stored separately in:
+
+```text
+$HOME/.config/radio-rust/programs.sqlite
+```
+
+Use `--db /path/to/programs.sqlite` with `programs` commands to select another
+catalog database.
+
 You can override it with `--db /path/to/schedule.sqlite`.
 App configuration is stored separately in:
 
@@ -179,6 +188,54 @@ cargo run -- cron remove 1
 Cron schedules are stored in the same SQLite database. The service materializes the
 next matching cron occurrence into the normal one-shot schedule queue, so
 scheduled replacement/fade behavior stays the same.
+
+### Public programs calendar
+
+Recurring program listings are stored in a separate `programs.sqlite` database;
+the playback service does not read this catalog. Times use the machine's local
+timezone. Add a weekly live program, list it, and record a one-date cancellation
+or time/name override:
+
+```bash
+cargo run -- programs add good-morning-vietnam "GOOD MORNING VIETNAM" \
+  --days mon-thu --start 09:09 --end 11:00 --platform "External live"
+cargo run -- programs list --json
+cargo run -- programs update good-morning-vietnam --platform "External live" --url "https://example.org/live"
+cargo run -- programs exception set good-morning-vietnam --date 2026-10-05 --cancel
+cargo run -- programs exception set good-morning-vietnam --date 2026-10-06 \
+  --start 10:00 --end 12:00 --name "GOOD MORNING VIETNAM (SPECIAL)"
+cargo run -- programs exception list --json
+cargo run -- programs exception remove good-morning-vietnam 2026-10-06
+```
+
+Use `programs special add` for a one-off program on a date not covered by a
+weekly recurrence. Exceptions and special programs can also be listed or removed
+with their respective subcommands:
+
+```bash
+cargo run -- programs special add saturday-special "Saturday Special" \
+  --date 2026-10-10 --start 12:00 --end 13:30
+cargo run -- programs special list --json
+cargo run -- programs special remove saturday-special 2026-10-10
+```
+
+An empty quoted value in `programs update` clears optional metadata, for example
+`--url ""`.
+
+Export inclusive full calendar months as one JSON file per month. For example,
+October through December 2026 produces `2026-10.json`, `2026-11.json`, and
+`2026-12.json` in the output directory:
+
+```bash
+cargo run -- programs export --from-month 2026-10 --to-month 2026-12 \
+  --output-dir /path/to/web/schedule
+```
+
+The export expands recurring programs, applies date exceptions, and adds
+one-off programs. Event timestamps are RFC3339 values with the local UTC offset.
+The exported `origin` is `external_live`, `kind` identifies `recurring`,
+`exception`, or `special` entries, and `cancelled` marks cancelled occurrences.
+The website can derive upcoming/current/past status from the timestamps.
 
 ### Streams
 

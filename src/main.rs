@@ -4,6 +4,7 @@ mod cron;
 mod icecast;
 mod mcp;
 mod playback;
+mod programs;
 mod schedule;
 mod service;
 mod streams;
@@ -14,11 +15,13 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::cli::{
-    Cli, Commands, CronCommands, IcecastCommands, McpCommands, McpTokenCommands, ScheduleCommands,
-    ServiceCommands, StreamsCommands, TimeSignalCommands,
+    Cli, Commands, CronCommands, IcecastCommands, McpCommands, McpTokenCommands,
+    ProgramExceptionCommands, ProgramsCommands, ScheduleCommands, ServiceCommands,
+    SpecialProgramCommands, StreamsCommands, TimeSignalCommands,
 };
 use crate::config::{
-    load_app_config, resolve_config_path, resolve_db_path, resolve_service_socket_path,
+    load_app_config, resolve_config_path, resolve_db_path, resolve_programs_db_path,
+    resolve_service_socket_path,
 };
 use crate::cron::{run_cron_add, run_cron_list, run_cron_remove};
 use crate::icecast::{
@@ -29,6 +32,11 @@ use crate::icecast::{
 use crate::mcp::{
     run_mcp_configure, run_mcp_disable, run_mcp_enable, run_mcp_server, run_mcp_status,
     run_mcp_token_create, run_mcp_token_list, run_mcp_token_revoke,
+};
+use crate::programs::{
+    ProgramMetadata, run_exception_list, run_exception_remove, run_exception_set, run_program_add,
+    run_program_export, run_program_list, run_program_remove, run_program_update, run_special_add,
+    run_special_list, run_special_remove,
 };
 use crate::schedule::{
     run_scan, run_schedule_add, run_schedule_list, run_schedule_run, validate_volume,
@@ -47,12 +55,151 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Scan { folder, json } => run_scan(&folder, json),
         Commands::Schedule { command } => run_schedule_command(command),
+        Commands::Programs { command } => run_programs_command(command),
         Commands::Streams { command } => run_streams_command(command),
         Commands::TimeSignal { command } => run_time_signal_command(command),
         Commands::Cron { command } => run_cron_command(command),
         Commands::Icecast { command } => run_icecast_command(command),
         Commands::Mcp { command } => run_mcp_command(command),
         Commands::Service { command } => run_service_command(command),
+    }
+}
+
+fn run_programs_command(command: ProgramsCommands) -> Result<()> {
+    match command {
+        ProgramsCommands::Add {
+            slug,
+            name,
+            days,
+            start,
+            end,
+            description,
+            platform,
+            url,
+            db,
+        } => run_program_add(
+            &resolve_programs_db_path(db)?,
+            &slug,
+            &name,
+            &days,
+            &start,
+            &end,
+            ProgramMetadata {
+                description: description.as_deref(),
+                platform: platform.as_deref(),
+                url: url.as_deref(),
+            },
+        ),
+        ProgramsCommands::Update {
+            slug,
+            name,
+            days,
+            start,
+            end,
+            description,
+            platform,
+            url,
+            enabled,
+            db,
+        } => run_program_update(
+            &resolve_programs_db_path(db)?,
+            &slug,
+            name.as_deref(),
+            days.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+            description.as_deref(),
+            platform.as_deref(),
+            url.as_deref(),
+            enabled,
+        ),
+        ProgramsCommands::List { json, db } => {
+            run_program_list(&resolve_programs_db_path(db)?, json)
+        }
+        ProgramsCommands::Remove { slug, db } => {
+            run_program_remove(&resolve_programs_db_path(db)?, &slug)
+        }
+        ProgramsCommands::Exception { command } => run_program_exception_command(command),
+        ProgramsCommands::Special { command } => run_special_program_command(command),
+        ProgramsCommands::Export {
+            from_month,
+            to_month,
+            output_dir,
+            db,
+        } => run_program_export(
+            &resolve_programs_db_path(db)?,
+            &from_month,
+            &to_month,
+            &output_dir,
+        ),
+    }
+}
+
+fn run_program_exception_command(command: ProgramExceptionCommands) -> Result<()> {
+    match command {
+        ProgramExceptionCommands::Set {
+            slug,
+            date,
+            cancel,
+            start,
+            end,
+            name,
+            db,
+        } => run_exception_set(
+            &resolve_programs_db_path(db)?,
+            &slug,
+            &date,
+            cancel,
+            start.as_deref(),
+            end.as_deref(),
+            name.as_deref(),
+        ),
+        ProgramExceptionCommands::List { from, to, json, db } => run_exception_list(
+            &resolve_programs_db_path(db)?,
+            from.as_deref(),
+            to.as_deref(),
+            json,
+        ),
+        ProgramExceptionCommands::Remove { slug, date, db } => {
+            run_exception_remove(&resolve_programs_db_path(db)?, &slug, &date)
+        }
+    }
+}
+
+fn run_special_program_command(command: SpecialProgramCommands) -> Result<()> {
+    match command {
+        SpecialProgramCommands::Add {
+            slug,
+            name,
+            date,
+            start,
+            end,
+            description,
+            platform,
+            url,
+            db,
+        } => run_special_add(
+            &resolve_programs_db_path(db)?,
+            &slug,
+            &name,
+            &date,
+            &start,
+            &end,
+            ProgramMetadata {
+                description: description.as_deref(),
+                platform: platform.as_deref(),
+                url: url.as_deref(),
+            },
+        ),
+        SpecialProgramCommands::List { from, to, json, db } => run_special_list(
+            &resolve_programs_db_path(db)?,
+            from.as_deref(),
+            to.as_deref(),
+            json,
+        ),
+        SpecialProgramCommands::Remove { slug, date, db } => {
+            run_special_remove(&resolve_programs_db_path(db)?, &slug, &date)
+        }
     }
 }
 
