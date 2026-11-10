@@ -1,0 +1,23 @@
+radio-fm 0.0.7 - Linux arm64
+
+Source: https://github.com/itsuki-irratia/radio-rust/tree/v0.0.7
+Source commit: 251775b
+Rust target: aarch64-unknown-linux-gnu
+Rust compiler: 1.89.0
+C compiler: GCC 14.2.0
+Build system: Debian 13 (trixie), glibc 2.41
+Linked against: GStreamer 1.26.2 and GLib 2.84.4
+SQLite: bundled via libsqlite3-sys 0.39.1
+Build command: cargo build --locked --release --target aarch64-unknown-linux-gnu
+
+Verification: --version, --help, and 34 release-profile tests passed under
+QEMU user-mode emulation. Physical audio hardware was not tested.
+
+Runtime: Debian 13 for this architecture, or a compatible Linux environment
+with glibc, GLib/GIO, libgcc, GStreamer, and plugins for your audio formats.
+These shared libraries are not included in this bundle.
+Example runtime packages on Debian 13:
+  sudo apt install libgstreamer1.0-0 libglib2.0-0t64 libgcc-s1 \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+See README.md for audio backend and optional Icecast dependencies.
