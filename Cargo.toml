@@ -2,6 +2,7 @@
 name = "radio-fm"
 version = "0.0.6"
 edition = "2024"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 
 [dependencies]
@@ -12,7 +13,7 @@ fs2 = "0.4"
 libc = "0.2"
 gstreamer = "0.24"
 quick-xml = "0.41"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

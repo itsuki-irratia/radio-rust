@@ -53,6 +53,8 @@ sudo pacman -S --needed \
 
 ## Build
 
+Requires Rust 1.89 or newer.
+
 ```bash
 cargo build
 ```
