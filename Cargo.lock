@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "radio-fm"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "chrono",
